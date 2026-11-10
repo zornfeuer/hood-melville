@@ -34,13 +34,14 @@ static void node_release(node *n) {
   }
 }
 
-// Allocate a new node (refcount=1) pointing to an existing shared node.
+// Allocate a new node (refcount=1) on top of `next`. Takes over the caller's
+// reference to `next` instead of adding one, like Stack::cons in Rust.
 static node *cons(int value, node *next) {
   node *n = malloc(sizeof(node));
   if (!n) abort();
   n->value    = value;
   n->refcount = 1;
-  n->next     = node_retain(next);
+  n->next     = next;
   return n;
 }
 
@@ -87,19 +88,26 @@ static void copy_into(fqueue *restrict dst, const fqueue *restrict src) {
   rotation_retain(&dst->rot);
 }
 
-// Advance a node pointer to its successor with correct ownership transfer.
+// Replace the reference `n` with a reference to its successor, like
+// Stack::advance in Rust. A node owned only by us is freed and hands its
+// reference to the successor over without touching the count (the successor's
+// count is loaded early, as in node_release); a shared node stays with the
+// other versions, and we take a new reference to its successor.
 static node *node_advance(node *n) {
-  node *next = node_retain(n ? n->next : NULL);
-  node_release(n);
-  return next;
+  if (!n) return NULL;
+  node *next = n->next;
+  if (n->refcount == 1) {
+    if (next) (void)*(volatile int *)&next->refcount;
+    free(n);
+    return next;
+  }
+  n->refcount--;
+  return node_retain(next);
 }
 
-// Set *dst to a new cons node built from (value, *dst), releasing the old *dst.
-// Pattern: acc = cons(value, acc) with ref-counting.
+// *dst = cons(value, *dst): the reference *dst held moves into the new node.
 static void cons_prepend(node **dst, int value) {
-  node *old = *dst;
-  *dst = cons(value, old); // cons retains old internally
-  node_release(old);       // release the ref that *dst used to hold
+  *dst = cons(value, *dst);
 }
 
 static void start_rotation(fqueue *q) {
@@ -191,10 +199,7 @@ int fqueue_size(const fqueue *q) { return q->size; }
 void fqueue_push(fqueue *restrict out, const fqueue *restrict q, int value) {
   assert(out != q);
   copy_into(out, q);
-  // Replace out->rear (retained by the copy) with cons(value, old_rear).
-  node *old_rear = out->rear;
-  out->rear = cons(value, old_rear); // cons retains old_rear
-  node_release(old_rear);            // release the copy's retain
+  cons_prepend(&out->rear, value); // the copy's reference to rear moves in
   out->rear_len++;
   out->size++;
   if (out->rot.tag == FQUEUE_IMPL_IDLE && out->rear_len > out->front_len)
@@ -206,10 +211,7 @@ bool fqueue_pop(fqueue *restrict out, const fqueue *restrict q) {
   assert(out != q);
   if (q->size == 0) return false;
   copy_into(out, q);
-  // Advance out->front (retained by the copy) to its successor.
-  node *old_head = out->front;
-  out->front = node_retain(old_head->next); // take ownership of next
-  node_release(old_head);                   // release the copy's retain of head
+  out->front = node_advance(out->front); // head is shared with q
   out->front_len--;
   out->size--;
   // During a rotation ok >= 1 here (lemma 2 in docs/proof.md).
