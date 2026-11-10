@@ -1,47 +1,102 @@
 cmake_minimum_required(VERSION 3.20)
-project(hood_melville_c C CXX)
-set(CMAKE_C_STANDARD 17)
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+project(hood_melville VERSION 0.1.0 LANGUAGES C)
 
-# Библиотека.
+# Тесты и нагрузка нужны только самому проекту, не тем, кто подключает его
+# через add_subdirectory/FetchContent.
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    set(HOOD_MELVILLE_TOP_LEVEL ON)
+    set(CMAKE_C_STANDARD 17)
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+else()
+    set(HOOD_MELVILLE_TOP_LEVEL OFF)
+endif()
+option(HOOD_MELVILLE_BUILD_TESTS "Собирать тесты (Catch2)" ${HOOD_MELVILLE_TOP_LEVEL})
+option(HOOD_MELVILLE_BUILD_BENCH "Собирать нагрузку для бенчмарков" ${HOOD_MELVILLE_TOP_LEVEL})
+option(HOOD_MELVILLE_INSTALL "Генерировать правила установки" ${HOOD_MELVILLE_TOP_LEVEL})
+
+include(GNUInstallDirs)
+
+# Библиотека: экземпляр шаблона для int. Шаблон fqueue_template.h для своих
+# типов ставится вместе с ней. В разделяемой сборке видны только публичные
+# функции (FQUEUE_API в fqueue.h).
 add_library(fqueue src/fqueue.c)
-target_include_directories(fqueue PUBLIC include)
+add_library(hood_melville::fqueue ALIAS fqueue)
+target_include_directories(fqueue PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_compile_features(fqueue PUBLIC c_std_11) # анонимные union в заголовке
+set_target_properties(fqueue PROPERTIES
+    C_VISIBILITY_PRESET hidden
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR})
 
-# Тесты (Catch2).
-include(FetchContent)
-FetchContent_Declare(
-    Catch2
-    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-    GIT_TAG v3.7.0
-)
-FetchContent_MakeAvailable(Catch2)
-enable_testing()
-add_executable(fqueue_test tests/fqueue_test.cxx tests/fqueue_generic_test.cxx
-    tests/fqueue_generic.c)
-target_link_libraries(fqueue_test PRIVATE fqueue Catch2::Catch2WithMain)
-add_test(NAME fqueue_test COMMAND fqueue_test --skip-benchmarks)
+if(HOOD_MELVILLE_INSTALL)
+    include(CMakePackageConfigHelpers)
+    install(TARGETS fqueue EXPORT hood_melville_targets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES include/fqueue.h include/fqueue_common.h include/fqueue_template.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    set(HOOD_MELVILLE_CMAKE_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/hood_melville)
+    install(EXPORT hood_melville_targets
+        FILE hood_melvilleTargets.cmake
+        NAMESPACE hood_melville::
+        DESTINATION ${HOOD_MELVILLE_CMAKE_DIR})
+    configure_package_config_file(
+        cmake/hood_melvilleConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/hood_melvilleConfig.cmake
+        INSTALL_DESTINATION ${HOOD_MELVILLE_CMAKE_DIR})
+    write_basic_package_version_file(
+        ${CMAKE_CURRENT_BINARY_DIR}/hood_melvilleConfigVersion.cmake
+        COMPATIBILITY SameMinorVersion) # до 1.0 минорная версия ломает API
+    install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/hood_melvilleConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/hood_melvilleConfigVersion.cmake
+        DESTINATION ${HOOD_MELVILLE_CMAKE_DIR})
+endif()
 
-# Пути ошибок: те же исходники с тестовым аллокатором (может отказать в
-# выбранной аллокации) и малыми пределами, чтобы до них можно было дойти.
-set(FQUEUE_TEST_LEN_LIMIT 40)
-set(FQUEUE_TEST_REFS_LIMIT 100)
-add_library(fqueue_limits STATIC src/fqueue.c)
-target_include_directories(fqueue_limits PUBLIC include)
-target_compile_definitions(fqueue_limits PRIVATE
-    FQUEUE_MALLOC=fqueue_test_malloc FQUEUE_FREE=fqueue_test_free
-    FQUEUE_IMPL_LEN_LIMIT=${FQUEUE_TEST_LEN_LIMIT}
-    FQUEUE_IMPL_REFS_LIMIT=${FQUEUE_TEST_REFS_LIMIT})
-add_executable(fqueue_limits_test tests/fqueue_limits_test.cxx)
-target_compile_definitions(fqueue_limits_test PRIVATE
-    TEST_LEN_LIMIT=${FQUEUE_TEST_LEN_LIMIT}
-    TEST_REFS_LIMIT=${FQUEUE_TEST_REFS_LIMIT})
-target_link_libraries(fqueue_limits_test PRIVATE fqueue_limits Catch2::Catch2WithMain)
-add_test(NAME fqueue_limits_test COMMAND fqueue_limits_test)
+if(HOOD_MELVILLE_BUILD_TESTS)
+    enable_language(CXX)
+    set(CMAKE_CXX_STANDARD 20)
+    include(FetchContent)
+    FetchContent_Declare(
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG v3.7.0
+    )
+    FetchContent_MakeAvailable(Catch2)
+    enable_testing()
 
-# Нагрузка для сравнения с Rust (just bench-*): максимальная оптимизация
-# независимо от CMAKE_BUILD_TYPE.
-add_executable(fqueue_bench bench/fqueue_bench.c src/fqueue.c)
-target_include_directories(fqueue_bench PRIVATE include)
-target_compile_options(fqueue_bench PRIVATE -O3 -march=native -flto -DNDEBUG)
-target_link_options(fqueue_bench PRIVATE -flto)
+    add_executable(fqueue_test tests/fqueue_test.cxx tests/fqueue_generic_test.cxx
+        tests/fqueue_generic.c)
+    target_link_libraries(fqueue_test PRIVATE fqueue Catch2::Catch2WithMain)
+    add_test(NAME fqueue_test COMMAND fqueue_test --skip-benchmarks)
+
+    # Пути ошибок: те же исходники с тестовым аллокатором (может отказать в
+    # выбранной аллокации) и малыми пределами, чтобы до них можно было дойти.
+    set(FQUEUE_TEST_LEN_LIMIT 40)
+    set(FQUEUE_TEST_REFS_LIMIT 100)
+    add_library(fqueue_limits STATIC src/fqueue.c)
+    target_include_directories(fqueue_limits PUBLIC include)
+    target_compile_definitions(fqueue_limits PRIVATE
+        FQUEUE_MALLOC=fqueue_test_malloc FQUEUE_FREE=fqueue_test_free
+        FQUEUE_IMPL_LEN_LIMIT=${FQUEUE_TEST_LEN_LIMIT}
+        FQUEUE_IMPL_REFS_LIMIT=${FQUEUE_TEST_REFS_LIMIT})
+    add_executable(fqueue_limits_test tests/fqueue_limits_test.cxx)
+    target_compile_definitions(fqueue_limits_test PRIVATE
+        TEST_LEN_LIMIT=${FQUEUE_TEST_LEN_LIMIT}
+        TEST_REFS_LIMIT=${FQUEUE_TEST_REFS_LIMIT})
+    target_link_libraries(fqueue_limits_test PRIVATE fqueue_limits Catch2::Catch2WithMain)
+    add_test(NAME fqueue_limits_test COMMAND fqueue_limits_test)
+endif()
+
+if(HOOD_MELVILLE_BUILD_BENCH)
+    # Нагрузка для сравнения с Rust (just bench-*): максимальная оптимизация
+    # независимо от CMAKE_BUILD_TYPE.
+    add_executable(fqueue_bench bench/fqueue_bench.c src/fqueue.c)
+    target_include_directories(fqueue_bench PRIVATE include)
+    target_compile_options(fqueue_bench PRIVATE -O3 -march=native -flto -DNDEBUG)
+    target_link_options(fqueue_bench PRIVATE -flto)
+endif()

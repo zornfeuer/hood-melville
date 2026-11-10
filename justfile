@@ -26,6 +26,16 @@ c-leaks: c-build
     leaks --atExit -- ./build/c/fqueue_test --skip-benchmarks
     leaks --atExit -- ./build/c/fqueue_limits_test
 
+# Установка C-библиотеки (разделяемой) и сборка примера через find_package.
+c-install-check:
+    cmake -S c -B build/c-pkg -DBUILD_SHARED_LIBS=ON -DHOOD_MELVILLE_BUILD_TESTS=OFF \
+        -DHOOD_MELVILLE_BUILD_BENCH=OFF -DHOOD_MELVILLE_INSTALL=ON > /dev/null
+    cmake --build build/c-pkg
+    cmake --install build/c-pkg --prefix "$PWD/build/c-prefix" > /dev/null
+    cmake -S c/examples/consumer -B build/consumer -DCMAKE_PREFIX_PATH="$PWD/build/c-prefix" > /dev/null
+    cmake --build build/consumer
+    ./build/consumer/consumer
+
 # --- Rust --------------------------------------------------------------------
 
 rust-test:

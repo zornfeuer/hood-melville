@@ -39,6 +39,9 @@
 // status other than FQUEUE_OK, `q` is unchanged, *out is left uninitialized
 // (nothing to destroy) and no memory is leaked. The library never aborts.
 //
+// Optional parameter FQUEUE_API: a prefix for the declarations of the public
+// functions, e.g. a visibility or dllexport attribute (see fqueue.h).
+//
 // Implementation options (define before the FQUEUE_IMPLEMENTATION include):
 // FQUEUE_MALLOC and FQUEUE_FREE together replace malloc and free; they must
 // have the same signatures.
@@ -69,6 +72,10 @@
 #define FQUEUE_IMPL_N(x)       FQUEUE_IMPL_CAT(FQUEUE_NAME, x)
 #define FQUEUE_IMPL_P(x)       FQUEUE_IMPL_CAT(FQUEUE_NAME, impl_##x)
 #define FQUEUE_IMPL_NODE       FQUEUE_IMPL_P(node)
+
+#ifndef FQUEUE_API
+#define FQUEUE_API
+#endif
 
 #ifndef FQUEUE_IMPLEMENTATION
 
@@ -113,11 +120,11 @@ typedef struct FQUEUE_NAME {
 } FQUEUE_NAME;
 
 // Initialize *q as an empty queue. Allocates nothing.
-void FQUEUE_IMPL_N(init)(FQUEUE_NAME* q);
+FQUEUE_API void FQUEUE_IMPL_N(init)(FQUEUE_NAME* q);
 
 // Initialize *out as another owner of the version `q`: the same contents,
 // all nodes shared, nothing allocated. Fails only with FQUEUE_OVERFLOW.
-FQUEUE_IMPL_NODISCARD
+FQUEUE_IMPL_NODISCARD FQUEUE_API
 fqueue_status FQUEUE_IMPL_N(clone)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
                                    const FQUEUE_NAME* FQUEUE_IMPL_RESTRICT q);
 
@@ -127,21 +134,21 @@ fqueue_status FQUEUE_IMPL_N(clone)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
 // storage of *q itself is not freed. Unlike free(), destroying twice is an
 // error — like Rust's drop, and resetting *q measurably slows linear
 // histories (docs/benchmarks.md).
-void FQUEUE_IMPL_N(destroy)(FQUEUE_NAME* q);
+FQUEUE_API void FQUEUE_IMPL_N(destroy)(FQUEUE_NAME* q);
 
 // Return true iff the queue contains no elements.
-bool FQUEUE_IMPL_N(is_empty)(const FQUEUE_NAME* q);
+FQUEUE_API bool FQUEUE_IMPL_N(is_empty)(const FQUEUE_NAME* q);
 
 // Number of elements in the queue.
-size_t FQUEUE_IMPL_N(size)(const FQUEUE_NAME* q);
+FQUEUE_API size_t FQUEUE_IMPL_N(size)(const FQUEUE_NAME* q);
 
 // Front element: write it to *value and return true; if `q` is empty, return
 // false and leave *value untouched.
-bool FQUEUE_IMPL_N(front)(const FQUEUE_NAME* q, FQUEUE_T* value);
+FQUEUE_API bool FQUEUE_IMPL_N(front)(const FQUEUE_NAME* q, FQUEUE_T* value);
 
 // Enqueue: initialize *out as `q` with `value` appended to the rear.
 // Fails with FQUEUE_NOMEM or FQUEUE_OVERFLOW.
-FQUEUE_IMPL_NODISCARD
+FQUEUE_IMPL_NODISCARD FQUEUE_API
 fqueue_status FQUEUE_IMPL_N(push)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
                                   const FQUEUE_NAME* FQUEUE_IMPL_RESTRICT q,
                                   FQUEUE_T value);
@@ -149,7 +156,7 @@ fqueue_status FQUEUE_IMPL_N(push)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
 // Dequeue: initialize *out as `q` without its front element. Fails with
 // FQUEUE_EMPTY (*out is then not even written), FQUEUE_NOMEM or
 // FQUEUE_OVERFLOW.
-FQUEUE_IMPL_NODISCARD
+FQUEUE_IMPL_NODISCARD FQUEUE_API
 fqueue_status FQUEUE_IMPL_N(pop)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
                                  const FQUEUE_NAME* FQUEUE_IMPL_RESTRICT q);
 
@@ -164,19 +171,19 @@ typedef struct {
 
 // Initialize *it at the front of `q`. Fails only with FQUEUE_OVERFLOW, as
 // NAME_clone; *it is then uninitialized.
-FQUEUE_IMPL_NODISCARD
+FQUEUE_IMPL_NODISCARD FQUEUE_API
 fqueue_status FQUEUE_IMPL_N(iter_init)(FQUEUE_IMPL_N(iter)* it,
                                        const FQUEUE_NAME* q);
 
 // Next element: write it to *value and return FQUEUE_OK; FQUEUE_EMPTY after
 // the last one. FQUEUE_NOMEM or FQUEUE_OVERFLOW leave *it and *value
 // unchanged, so the step can be retried.
-FQUEUE_IMPL_NODISCARD
+FQUEUE_IMPL_NODISCARD FQUEUE_API
 fqueue_status FQUEUE_IMPL_N(iter_next)(FQUEUE_IMPL_N(iter)* it,
                                        FQUEUE_T* value);
 
 // Release the iterator, at any point of the iteration.
-void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter)* it);
+FQUEUE_API void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter)* it);
 
 #ifdef __cplusplus
 }
@@ -533,3 +540,4 @@ void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter) *it) {
 #undef FQUEUE_NAME
 #undef FQUEUE_T
 #undef FQUEUE_IMPLEMENTATION
+#undef FQUEUE_API

@@ -1,0 +1,4 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/hood_melvilleTargets.cmake")
+check_required_components(hood_melville)

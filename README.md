@@ -102,6 +102,27 @@ C сейчас быстрее во всех сценариях; Rust выпол�
 инструкций — это следующая цель исследования. Подробности, распределения и
 оговорки (режимы аллокатора, влияние раскладки кода) — `docs/benchmarks.md`.
 
+## Установка C-библиотеки
+
+```
+cmake -S c -B build/c -DCMAKE_BUILD_TYPE=Release [-DBUILD_SHARED_LIBS=ON]
+cmake --build build/c
+cmake --install build/c --prefix <prefix>
+```
+
+Ставятся `libfqueue` (очередь для `int`), заголовки `fqueue.h`,
+`fqueue_common.h`, `fqueue_template.h` и пакет CMake:
+
+```cmake
+find_package(hood_melville 0.1 REQUIRED)
+target_link_libraries(app PRIVATE hood_melville::fqueue)
+```
+
+Подключать можно и через `add_subdirectory`/`FetchContent` — тесты и нагрузка
+тогда не собираются (`HOOD_MELVILLE_BUILD_TESTS`, `HOOD_MELVILLE_BUILD_BENCH`).
+Разделяемая библиотека экспортирует только публичные функции. Пример —
+`c/examples/consumer` (`just c-install-check`).
+
 ## Запуск
 
 Нужны `cmake`, C/C++-компилятор, Rust (stable; nightly с `miri` — для
@@ -110,6 +131,8 @@ C сейчас быстрее во всех сценариях; Rust выпол�
 ```
 just test                    # C- и Rust-тесты
 just c-asan                  # C-тесты под ASan/UBSan
+just c-leaks                 # C-тесты под leaks (macOS)
+just c-install-check         # установка C-библиотеки и пример через find_package
 just rust-lint               # rustfmt + clippy::pedantic
 just rust-miri               # Rust-тесты под Miri
 just bench-compare-layouts   # сравнение C и Rust (несколько минут)

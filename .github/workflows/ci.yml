@@ -26,6 +26,15 @@ jobs:
           cmake --build build/c-asan --target fqueue_test fqueue_limits_test
           ./build/c-asan/fqueue_test --skip-benchmarks
           ./build/c-asan/fqueue_limits_test
+      - name: install as a package and use it
+        run: |
+          cmake -S c -B build/c-pkg -DBUILD_SHARED_LIBS=ON -DHOOD_MELVILLE_BUILD_TESTS=OFF \
+            -DHOOD_MELVILLE_BUILD_BENCH=OFF -DHOOD_MELVILLE_INSTALL=ON
+          cmake --build build/c-pkg
+          cmake --install build/c-pkg --prefix "$PWD/build/c-prefix"
+          cmake -S c/examples/consumer -B build/consumer -DCMAKE_PREFIX_PATH="$PWD/build/c-prefix"
+          cmake --build build/consumer
+          ./build/consumer/consumer
 
   rust:
     runs-on: ubuntu-latest
