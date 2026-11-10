@@ -5,6 +5,31 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#if defined(FQUEUE_MALLOC) != defined(FQUEUE_FREE)
+#error "define both FQUEUE_MALLOC and FQUEUE_FREE, or neither"
+#endif
+#ifdef FQUEUE_MALLOC
+void *FQUEUE_MALLOC(size_t size);
+void  FQUEUE_FREE(void *ptr);
+#else
+#define FQUEUE_MALLOC malloc
+#define FQUEUE_FREE   free
+#endif
+
+// Limits; the tests lower them to reach the error paths. A queue holds at most
+// LEN_LIMIT elements. Between operations every node has at most REFS_LIMIT
+// references: every reference an operation adds goes through node_retain,
+// which reports a count above the limit, and such an operation is undone.
+// Within one operation a count grows by at most 10 (6 in copy_into, 1 in
+// start_rotation, 3 in node_advance), so the headroom above REFS_LIMIT keeps
+// it from wrapping before the operation is undone.
+#ifndef FQUEUE_IMPL_LEN_LIMIT
+#define FQUEUE_IMPL_LEN_LIMIT UINT32_MAX
+#endif
+#ifndef FQUEUE_IMPL_REFS_LIMIT
+#define FQUEUE_IMPL_REFS_LIMIT (UINT32_MAX - 16)
+#endif
+
 struct fqueue_impl_node {
   int                      value;
   uint32_t                 refcount;
@@ -14,16 +39,14 @@ struct fqueue_impl_node {
 typedef struct fqueue_impl_node node;
 typedef fqueue_impl_rotation rotation;
 
-// Increment refcount; NULL-safe. Returns n for chaining. Aborts on overflow
-// (more than UINT32_MAX references to one node), like NodePtr::clone in Rust:
-// overwriting a version without destroying it leaks its references, so the
-// count can overflow without UB in the caller.
-static node *node_retain(node *n) {
-  if (n) {
-    if (n->refcount == UINT32_MAX) abort();
-    n->refcount++;
-  }
-  return n;
+// Increment refcount; NULL-safe. Returns true iff the count is now above
+// REFS_LIMIT; callers accumulate that with `|` and undo the operation (the
+// assert verifies the headroom in tests).
+static bool node_retain(node *n) {
+  if (!n) return false;
+  assert(n->refcount < FQUEUE_IMPL_REFS_LIMIT + 16);
+  n->refcount++;
+  return n->refcount > FQUEUE_IMPL_REFS_LIMIT;
 }
 
 // Decrement refcount iteratively; free chain when count reaches 0.
@@ -35,16 +58,17 @@ static void node_release(node *n) {
   while (n && --n->refcount == 0) {
     node *next = n->next;
     if (next) (void)*(volatile uint32_t *)&next->refcount;
-    free(n);
+    FQUEUE_FREE(n);
     n = next;
   }
 }
 
 // Allocate a new node (refcount=1) on top of `next`. Takes over the caller's
 // reference to `next` instead of adding one, like Stack::cons in Rust.
+// Returns NULL, leaving the reference with the caller, if allocation fails.
 static node *cons(int value, node *next) {
-  node *n = malloc(sizeof(node));
-  if (!n) abort();
+  node *n = FQUEUE_MALLOC(sizeof(node));
+  if (!n) return NULL;
   n->value    = value;
   n->refcount = 1;
   n->next     = next;
@@ -52,20 +76,23 @@ static node *cons(int value, node *next) {
 }
 
 // Retain all node pointers held by a rotation, based on its current tag.
-static void rotation_retain(const rotation *r) {
+// Returns true iff a count went above REFS_LIMIT.
+static bool rotation_retain(const rotation *r) {
+  bool overflow = false; // accumulated without branches: all are retained
   switch (r->tag) {
   case FQUEUE_IMPL_IDLE: break;
   case FQUEUE_IMPL_REVERSING:
-    node_retain(r->reversing.acc);
-    node_retain(r->reversing.rfacc);
-    node_retain(r->reversing.old_front);
-    node_retain(r->reversing.old_rear);
+    overflow |= node_retain(r->reversing.acc);
+    overflow |= node_retain(r->reversing.rfacc);
+    overflow |= node_retain(r->reversing.old_front);
+    overflow |= node_retain(r->reversing.old_rear);
     break;
   case FQUEUE_IMPL_APPENDING:
-    node_retain(r->appending.acc);
-    node_retain(r->appending.rfacc);
+    overflow |= node_retain(r->appending.acc);
+    overflow |= node_retain(r->appending.rfacc);
     break;
   }
+  return overflow;
 }
 
 // Release all node pointers held by a rotation and reset it to IDLE.
@@ -87,39 +114,48 @@ static void rotation_release(rotation *r) {
 }
 
 // Make *dst a copy of *src that holds its own references to all shared nodes.
-static void copy_into(fqueue *restrict dst, const fqueue *restrict src) {
+// Returns true iff a count went above REFS_LIMIT.
+static bool copy_into(fqueue *restrict dst, const fqueue *restrict src) {
   *dst = *src;
-  node_retain(dst->front);
-  node_retain(dst->rear);
-  rotation_retain(&dst->rot);
+  bool overflow = node_retain(dst->front);
+  overflow |= node_retain(dst->rear);
+  overflow |= rotation_retain(&dst->rot);
+  return overflow;
 }
 
 // Replace the reference `n` with a reference to its successor, like
 // Stack::advance in Rust. A node owned only by us is freed and hands its
 // reference to the successor over without touching the count (the successor's
 // count is loaded early, as in node_release); a shared node stays with the
-// other versions, and we take a new reference to its successor.
-static node *node_advance(node *n) {
+// other versions, and we take a new reference to its successor (setting
+// *overflow if its count went above REFS_LIMIT).
+static node *node_advance(node *n, bool *overflow) {
   if (!n) return NULL;
   node *next = n->next;
   if (n->refcount == 1) {
     if (next) (void)*(volatile uint32_t *)&next->refcount;
-    free(n);
+    FQUEUE_FREE(n);
     return next;
   }
   n->refcount--;
-  return node_retain(next);
+  *overflow |= node_retain(next);
+  return next;
 }
 
 // *dst = cons(value, *dst): the reference *dst held moves into the new node.
-static void cons_prepend(node **dst, int value) {
-  *dst = cons(value, *dst);
+// Returns false, leaving *dst as it was, if allocation fails.
+static bool cons_prepend(node **dst, int value) {
+  node *n = cons(value, *dst);
+  if (!n) return false;
+  *dst = n;
+  return true;
 }
 
-static void start_rotation(fqueue *q) {
+// Returns true iff a count went above REFS_LIMIT.
+static bool start_rotation(fqueue *q) {
   q->rot.tag                 = FQUEUE_IMPL_REVERSING;
   // old_front shares front's node list — give old_front its own reference.
-  q->rot.reversing.old_front = node_retain(q->front);
+  q->rot.reversing.old_front = q->front;
   // old_rear takes ownership of rear; rear pointer is cleared.
   q->rot.reversing.old_rear  = q->rear; // transfer: rear's ref moves to old_rear
   q->rear                    = NULL;
@@ -127,6 +163,7 @@ static void start_rotation(fqueue *q) {
   q->rot.reversing.acc       = NULL;
   q->rot.reversing.rfacc     = NULL;
   q->rot.reversing.ok        = q->front_len;
+  return node_retain(q->front);
 }
 
 // Install acc as the new front and reset rotation state.
@@ -138,20 +175,28 @@ static void finish_rotation(fqueue *q) {
   q->rot.tag   = FQUEUE_IMPL_IDLE;
 }
 
-// One step of the ongoing rotation. Modifies q in place (q is already a fresh copy).
-static void rotate_step(fqueue *q) {
-  if (q->rot.tag == FQUEUE_IMPL_IDLE) return;
+// One step of the ongoing rotation. Modifies q in place (q is already a fresh
+// copy). Returns false if allocation fails; q may then be half-stepped, but
+// every field still owns its reference, so fqueue_destroy undoes it. Sets
+// *overflow if a count went above REFS_LIMIT.
+static bool rotate_step(fqueue *q, bool *overflow) {
+  if (q->rot.tag == FQUEUE_IMPL_IDLE) return true;
 
   if (q->rot.tag == FQUEUE_IMPL_REVERSING) {
-    cons_prepend(&q->rot.reversing.acc,   q->rot.reversing.old_rear->value);
-    q->rot.reversing.old_rear = node_advance(q->rot.reversing.old_rear);
+    if (!cons_prepend(&q->rot.reversing.acc, q->rot.reversing.old_rear->value))
+      return false;
+    q->rot.reversing.old_rear =
+        node_advance(q->rot.reversing.old_rear, overflow);
 
     if (q->rot.reversing.old_front != NULL) {
-      cons_prepend(&q->rot.reversing.rfacc, q->rot.reversing.old_front->value);
-      q->rot.reversing.old_front = node_advance(q->rot.reversing.old_front);
+      if (!cons_prepend(&q->rot.reversing.rfacc,
+                        q->rot.reversing.old_front->value))
+        return false;
+      q->rot.reversing.old_front =
+          node_advance(q->rot.reversing.old_front, overflow);
     }
 
-    if (q->rot.reversing.old_rear != NULL) return;
+    if (q->rot.reversing.old_rear != NULL) return true;
 
     // Transition to APPENDING: extract fields before overwriting the union.
     node           *acc   = q->rot.reversing.acc;
@@ -169,13 +214,31 @@ static void rotate_step(fqueue *q) {
   //   ok == 0       → all remaining steps are no-ops (elements already popped)
   if (q->rot.appending.rfacc == NULL || q->rot.appending.ok == 0) {
     finish_rotation(q);
-    return;
+    return true;
   }
-  cons_prepend(&q->rot.appending.acc, q->rot.appending.rfacc->value);
+  if (!cons_prepend(&q->rot.appending.acc, q->rot.appending.rfacc->value))
+    return false;
   q->rot.appending.ok--;
-  q->rot.appending.rfacc = node_advance(q->rot.appending.rfacc);
+  q->rot.appending.rfacc = node_advance(q->rot.appending.rfacc, overflow);
   if (q->rot.appending.rfacc == NULL || q->rot.appending.ok == 0)
     finish_rotation(q);
+  return true;
+}
+
+// Error exit of an operation: undo the partially built *out.
+static fqueue_status fail(fqueue *out, fqueue_status status) {
+  fqueue_destroy(out);
+  return status;
+}
+
+const char *fqueue_strerror(fqueue_status status) {
+  switch (status) {
+  case FQUEUE_OK:       return "success";
+  case FQUEUE_EMPTY:    return "queue is empty";
+  case FQUEUE_NOMEM:    return "out of memory";
+  case FQUEUE_OVERFLOW: return "too many elements or references";
+  }
+  return "unknown fqueue status";
 }
 
 void fqueue_init(fqueue *q) {
@@ -187,9 +250,10 @@ void fqueue_init(fqueue *q) {
   q->rot       = (rotation){ .tag = FQUEUE_IMPL_IDLE };
 }
 
-void fqueue_clone(fqueue *restrict out, const fqueue *restrict q) {
+fqueue_status fqueue_clone(fqueue *restrict out, const fqueue *restrict q) {
   assert(out != q);
-  copy_into(out, q);
+  if (copy_into(out, q)) return fail(out, FQUEUE_OVERFLOW);
+  return FQUEUE_OK;
 }
 
 void fqueue_destroy(fqueue *q) {
@@ -202,23 +266,28 @@ bool fqueue_is_empty(const fqueue *q) { return q->size == 0; }
 
 size_t fqueue_size(const fqueue *q) { return q->size; }
 
-void fqueue_push(fqueue *restrict out, const fqueue *restrict q, int value) {
+fqueue_status fqueue_push(fqueue *restrict out, const fqueue *restrict q,
+                          int value) {
   assert(out != q);
-  if (q->size == FQUEUE_IMPL_LEN_MAX) abort();
-  copy_into(out, q);
-  cons_prepend(&out->rear, value); // the copy's reference to rear moves in
+  if (q->size == FQUEUE_IMPL_LEN_LIMIT) return FQUEUE_OVERFLOW;
+  bool overflow = copy_into(out, q);
+  // The copy's reference to rear moves into the new node.
+  if (!cons_prepend(&out->rear, value)) return fail(out, FQUEUE_NOMEM);
   out->rear_len++;
   out->size++;
   if (out->rot.tag == FQUEUE_IMPL_IDLE && out->rear_len > out->front_len)
-    start_rotation(out);
-  rotate_step(out); // one step suffices: docs/proof.md
+    overflow |= start_rotation(out);
+  // One step suffices: docs/proof.md.
+  if (!rotate_step(out, &overflow)) return fail(out, FQUEUE_NOMEM);
+  if (overflow) return fail(out, FQUEUE_OVERFLOW);
+  return FQUEUE_OK;
 }
 
-bool fqueue_pop(fqueue *restrict out, const fqueue *restrict q) {
+fqueue_status fqueue_pop(fqueue *restrict out, const fqueue *restrict q) {
   assert(out != q);
-  if (q->size == 0) return false;
-  copy_into(out, q);
-  out->front = node_advance(out->front); // head is shared with q
+  if (q->size == 0) return FQUEUE_EMPTY;
+  bool overflow = copy_into(out, q);
+  out->front = node_advance(out->front, &overflow); // head is shared with q
   out->front_len--;
   out->size--;
   // During a rotation ok >= 1 here (lemma 2 in docs/proof.md).
@@ -229,10 +298,12 @@ bool fqueue_pop(fqueue *restrict out, const fqueue *restrict q) {
     assert(out->rot.appending.ok > 0);
     out->rot.appending.ok--;
   } else if (out->rear_len > out->front_len) {
-    start_rotation(out);
+    overflow |= start_rotation(out);
   }
-  rotate_step(out); // one step suffices: docs/proof.md
-  return true;
+  // One step suffices: docs/proof.md.
+  if (!rotate_step(out, &overflow)) return fail(out, FQUEUE_NOMEM);
+  if (overflow) return fail(out, FQUEUE_OVERFLOW);
+  return FQUEUE_OK;
 }
 
 bool fqueue_front(const fqueue *q, int *value) {

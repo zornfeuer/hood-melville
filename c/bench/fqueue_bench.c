@@ -33,6 +33,18 @@ static void phase(const char *name) {
 
 static uint64_t mix(uint64_t h, int x) { return h * 31 + (uint64_t)x; }
 
+// Ошибка библиотеки для нагрузки фатальна (в Rust push/pop паникуют сами).
+// Аварийная ветка вынесена и помечена холодной: иначе она мешает встраивать
+// keep_push/keep_pop в циклы сценариев.
+__attribute__((cold, noinline, noreturn)) static void die(fqueue_status s) {
+  fprintf(stderr, "fqueue: %s\n", fqueue_strerror(s));
+  exit(1);
+}
+
+static void check(fqueue_status s) {
+  if (s != FQUEUE_OK) die(s);
+}
+
 static uint64_t mix_front(uint64_t h, const fqueue *q) {
   int v = 0;
   fqueue_front(q, &v); // вызывается только для непустых
@@ -51,13 +63,13 @@ typedef struct {
 static const fqueue *cur(const linear *l) { return &l->buf[l->cur]; }
 
 static void lin_push(linear *l, int value) {
-  fqueue_push(&l->buf[l->cur ^ 1], &l->buf[l->cur], value);
+  check(fqueue_push(&l->buf[l->cur ^ 1], &l->buf[l->cur], value));
   fqueue_destroy(&l->buf[l->cur]);
   l->cur ^= 1;
 }
 
 static void lin_pop(linear *l) {
-  fqueue_pop(&l->buf[l->cur ^ 1], &l->buf[l->cur]);
+  check(fqueue_pop(&l->buf[l->cur ^ 1], &l->buf[l->cur]));
   fqueue_destroy(&l->buf[l->cur]);
   l->cur ^= 1;
 }
@@ -122,13 +134,13 @@ static const fqueue *last(const versions *v) { return &v->items[v->len - 1]; }
 
 static void keep_push(versions *v, int value) {
   fqueue *out = next_slot(v);
-  fqueue_push(out, last(v), value);
+  check(fqueue_push(out, last(v), value));
   v->len++;
 }
 
 static void keep_pop(versions *v) {
   fqueue *out = next_slot(v);
-  fqueue_pop(out, last(v));
+  check(fqueue_pop(out, last(v)));
   v->len++;
 }
 
@@ -185,13 +197,13 @@ static uint64_t run_branching(int n) {
     fqueue *child = next_slot(&v);
     const fqueue *parent = &v.items[idx];
     if (fqueue_is_empty(parent)) {
-      fqueue_push(child, parent, k);
+      check(fqueue_push(child, parent, k));
     } else {
       h = mix_front(h, parent);
       if ((x >> 40) % 3 == 0)
-        fqueue_pop(child, parent);
+        check(fqueue_pop(child, parent));
       else
-        fqueue_push(child, parent, k);
+        check(fqueue_push(child, parent, k));
     }
     heads[slot] = v.len++;
   }

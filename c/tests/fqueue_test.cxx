@@ -5,84 +5,11 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
-#include <optional>
 #include <queue>
-#include <utility>
 #include <vector>
 
 #include "fqueue.h"
-
-// RAII owner of one version, so that tests read like the Rust ones and cannot
-// leak: copying is fqueue_clone, destruction is fqueue_destroy, moving is a
-// bitwise copy followed by re-initializing the source.
-class Q {
-public:
-  Q() { fqueue_init(&q_); }
-  Q(const Q &other) { fqueue_clone(&q_, &other.q_); }
-  Q(Q &&other) noexcept : q_(other.q_) { fqueue_init(&other.q_); }
-  Q &operator=(Q other) noexcept {
-    std::swap(q_, other.q_);
-    return *this;
-  }
-  ~Q() { fqueue_destroy(&q_); }
-
-  Q push(int value) const {
-    Q r{uninit};
-    fqueue_push(&r.q_, &q_, value);
-    return r;
-  }
-
-  // nullopt on an empty queue.
-  std::optional<Q> pop() const {
-    Q r{uninit};
-    if (fqueue_pop(&r.q_, &q_)) return r;
-    fqueue_init(&r.q_); // fqueue_pop left it untouched
-    return std::nullopt;
-  }
-
-  std::optional<int> front() const {
-    int v;
-    if (!fqueue_front(&q_, &v)) return std::nullopt;
-    return v;
-  }
-
-  size_t size() const { return fqueue_size(&q_); }
-  bool   empty() const { return fqueue_is_empty(&q_); }
-
-  const fqueue *get() const { return &q_; }
-
-private:
-  struct Uninit {};
-  static constexpr Uninit uninit{};
-  explicit Q(Uninit) {} // storage for an fqueue_* output parameter
-
-  fqueue q_;
-};
-
-// Value at the front of a queue known to be non-empty.
-static int front_of(const fqueue *q) {
-  int v;
-  REQUIRE(fqueue_front(q, &v));
-  return v;
-}
-
-// Contents of q front to back; q itself is left untouched. Walks a clone,
-// moving each new version into `cur` bitwise.
-static std::vector<int> contents(const fqueue *q) {
-  std::vector<int> out;
-  fqueue cur, next;
-  fqueue_clone(&cur, q);
-  while (!fqueue_is_empty(&cur)) {
-    out.push_back(front_of(&cur));
-    fqueue_pop(&next, &cur);
-    fqueue_destroy(&cur);
-    cur = next;
-  }
-  fqueue_destroy(&cur);
-  return out;
-}
-
-static std::vector<int> contents(const Q &q) { return contents(q.get()); }
+#include "fqueue_test_util.hpp"
 
 TEST_CASE("fqueue_init produces an empty queue", "[fqueue]") {
   fqueue q;
@@ -96,6 +23,11 @@ TEST_CASE("fqueue_init produces an empty queue", "[fqueue]") {
   fqueue_destroy(&q);
 }
 
+TEST_CASE("fqueue_strerror describes every status", "[fqueue]") {
+  for (fqueue_status s : {FQUEUE_OK, FQUEUE_EMPTY, FQUEUE_NOMEM, FQUEUE_OVERFLOW})
+    REQUIRE(std::strlen(fqueue_strerror(s)) > 0);
+}
+
 TEST_CASE("fqueue_pop on an empty queue fails and leaves out untouched",
           "[fqueue]") {
   fqueue q, out;
@@ -104,7 +36,7 @@ TEST_CASE("fqueue_pop on an empty queue fails and leaves out untouched",
   unsigned char before[sizeof out];
   std::memcpy(before, &out, sizeof out);
 
-  REQUIRE(!fqueue_pop(&out, &q));
+  REQUIRE(fqueue_pop(&out, &q) == FQUEUE_EMPTY);
   REQUIRE(std::memcmp(before, &out, sizeof out) == 0);
   fqueue_destroy(&q);
 }
@@ -328,7 +260,7 @@ TEST_CASE("fqueue_clone shares contents and outlives the original",
   q = *q.pop();
 
   fqueue c;
-  fqueue_clone(&c, q.get());
+  REQUIRE(fqueue_clone(&c, q.get()) == FQUEUE_OK);
   std::vector<int> expected = contents(q);
   REQUIRE(contents(&c) == expected);
 
@@ -345,9 +277,9 @@ TEST_CASE("fqueue_destroy leaves storage reusable as out or for init",
           "[fqueue]") {
   fqueue q, q1;
   fqueue_init(&q);
-  fqueue_push(&q1, &q, 1);
+  REQUIRE(fqueue_push(&q1, &q, 1) == FQUEUE_OK);
   fqueue_destroy(&q);
-  fqueue_push(&q, &q1, 2); // destroyed storage as out
+  REQUIRE(fqueue_push(&q, &q1, 2) == FQUEUE_OK); // destroyed storage as out
   fqueue_destroy(&q1);
   REQUIRE(contents(&q) == std::vector<int>{1, 2});
 
@@ -382,10 +314,10 @@ TEST_CASE("fqueue branching history stored by value matches a reference model",
     std::deque<int> model = models[idx];
 
     fqueue child;
-    if ((x >> 40) % 3 == 0 && fqueue_pop(&child, parent)) {
+    if ((x >> 40) % 3 == 0 && fqueue_pop(&child, parent) == FQUEUE_OK) {
       model.pop_front();
     } else {
-      fqueue_push(&child, parent, k);
+      REQUIRE(fqueue_push(&child, parent, k) == FQUEUE_OK);
       model.push_back(k);
     }
 
@@ -421,25 +353,27 @@ static void explore(const fqueue *q, std::deque<int> &model, int depth,
   if (!model.empty()) REQUIRE(v == model.front());
 
   fqueue c;
-  fqueue_clone(&c, q);
+  REQUIRE(fqueue_clone(&c, q) == FQUEUE_OK);
   REQUIRE(contents(&c) == std::vector<int>(model.begin(), model.end()));
   fqueue_destroy(&c);
   if (depth == 0) return;
 
   fqueue child;
-  fqueue_push(&child, q, depth);
+  REQUIRE(fqueue_push(&child, q, depth) == FQUEUE_OK);
   model.push_back(depth);
   explore(&child, model, depth - 1, states);
   model.pop_back();
   fqueue_destroy(&child);
 
-  if (fqueue_pop(&child, q)) {
+  fqueue_status s = fqueue_pop(&child, q);
+  if (s == FQUEUE_OK) {
     int x = model.front();
     model.pop_front();
     explore(&child, model, depth - 1, states);
     model.push_front(x);
     fqueue_destroy(&child);
   } else {
+    REQUIRE(s == FQUEUE_EMPTY);
     REQUIRE(model.empty());
   }
 }

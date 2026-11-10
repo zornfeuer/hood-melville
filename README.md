@@ -40,16 +40,23 @@ C — версии хранятся по значению в памяти выз
 ```c
 #include "fqueue.h"
 
-fqueue a, b, c;
+fqueue a, b;
 fqueue_init(&a);
-fqueue_push(&b, &a, 42);        // a не изменилась
+fqueue_status s = fqueue_push(&b, &a, 42); // a не изменилась
+if (s != FQUEUE_OK) {                      // FQUEUE_NOMEM / FQUEUE_OVERFLOW:
+  fprintf(stderr, "%s\n", fqueue_strerror(s)); // b не инициализирована
+  ...
+}
 int x;
 fqueue_front(&b, &x);           // true, x == 42
-fqueue_clone(&c, &b);           // второй владелец той же версии, O(1)
 fqueue_destroy(&a);
 fqueue_destroy(&b);
-fqueue_destroy(&c);
 ```
+
+Библиотека не завершает процесс: нехватка памяти и переполнение длины или
+счётчика ссылок возвращаются как `fqueue_status`, аргумент при этом не
+меняется. В Rust те же ситуации, как принято в языке, — паника (`push` в
+очередь из `u32::MAX` элементов) или `abort` (переполнение счётчика, OOM).
 
 Rust:
 

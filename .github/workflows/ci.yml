@@ -16,14 +16,16 @@ jobs:
           cmake -S c -B build/c
           cmake --build build/c
           ./build/c/fqueue_test --skip-benchmarks
+          ./build/c/fqueue_limits_test
       - name: test under ASan/UBSan
         run: |
           cmake -S c -B build/c-asan -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-          cmake --build build/c-asan --target fqueue_test
+          cmake --build build/c-asan --target fqueue_test fqueue_limits_test
           ./build/c-asan/fqueue_test --skip-benchmarks
+          ./build/c-asan/fqueue_limits_test
 
   rust:
     runs-on: ubuntu-latest

@@ -16,6 +16,14 @@
 // For the operations below `out` is uninitialized storage (or a destroyed
 // version) and must not alias `q`.
 //
+// Errors. Operations that create a version return an fqueue_status. On any
+// status other than FQUEUE_OK, `q` is unchanged, *out is left uninitialized
+// (nothing to destroy) and no memory is leaked. The library never aborts.
+//
+// Build configuration (when compiling fqueue.c): define FQUEUE_MALLOC and
+// FQUEUE_FREE together to replace malloc and free; they must have the same
+// signatures.
+//
 // Threads. Versions that share nodes must not be used concurrently, even for
 // reading: reference counts are not atomic. Versions with no common history
 // are independent; the library has no global state.
@@ -31,6 +39,24 @@ extern "C" {
 #define FQUEUE_IMPL_RESTRICT restrict
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define FQUEUE_IMPL_NODISCARD __attribute__((warn_unused_result))
+#else
+#define FQUEUE_IMPL_NODISCARD
+#endif
+
+typedef enum fqueue_status {
+  FQUEUE_OK = 0,
+  FQUEUE_EMPTY,    // fqueue_pop on an empty queue
+  FQUEUE_NOMEM,    // a node could not be allocated
+  FQUEUE_OVERFLOW, // the queue would exceed UINT32_MAX elements, or a node
+                   // would get more references than its counter holds
+                   // (reachable only by leaking versions)
+} fqueue_status;
+
+// Human-readable description of a status, e.g. for error messages.
+const char* fqueue_strerror(fqueue_status status);
+
 typedef struct fqueue fqueue;
 
 // Representation. Exposed only so that versions can be stored by value;
@@ -38,10 +64,8 @@ typedef struct fqueue fqueue;
 // do not access them.
 typedef struct fqueue_impl_node fqueue_impl_node;
 
-// Lengths and the rotation counter `ok`; the same type as `Len` in Rust. A
-// queue holds at most FQUEUE_IMPL_LEN_MAX elements (checked in fqueue_push).
+// Lengths and the rotation counter `ok`; the same type as `Len` in Rust.
 typedef uint32_t fqueue_impl_len;
-#define FQUEUE_IMPL_LEN_MAX UINT32_MAX
 
 typedef enum {
   FQUEUE_IMPL_IDLE,
@@ -91,9 +115,10 @@ struct fqueue {
 void fqueue_init(fqueue* q);
 
 // Initialize *out as another owner of the version `q`: the same contents,
-// all nodes shared, nothing allocated.
-void fqueue_clone(fqueue* FQUEUE_IMPL_RESTRICT out,
-                  const fqueue* FQUEUE_IMPL_RESTRICT q);
+// all nodes shared, nothing allocated. Fails only with FQUEUE_OVERFLOW.
+FQUEUE_IMPL_NODISCARD
+fqueue_status fqueue_clone(fqueue* FQUEUE_IMPL_RESTRICT out,
+                           const fqueue* FQUEUE_IMPL_RESTRICT q);
 
 // Release the nodes owned by *q (shared nodes are freed only when no other
 // version references them). Afterwards *q is uninitialized storage, as after
@@ -113,15 +138,18 @@ size_t fqueue_size(const fqueue* q);
 // false and leave *value untouched.
 bool fqueue_front(const fqueue* q, int* value);
 
-// Enqueue: initialize *out as `q` with `value` appended to the rear. Aborts
-// if `q` already holds FQUEUE_IMPL_LEN_MAX elements.
-void fqueue_push(fqueue* FQUEUE_IMPL_RESTRICT out,
-                 const fqueue* FQUEUE_IMPL_RESTRICT q, int value);
+// Enqueue: initialize *out as `q` with `value` appended to the rear.
+// Fails with FQUEUE_NOMEM or FQUEUE_OVERFLOW.
+FQUEUE_IMPL_NODISCARD
+fqueue_status fqueue_push(fqueue* FQUEUE_IMPL_RESTRICT out,
+                          const fqueue* FQUEUE_IMPL_RESTRICT q, int value);
 
-// Dequeue: initialize *out as `q` without its front element and return true;
-// if `q` is empty, return false and leave *out untouched.
-bool fqueue_pop(fqueue* FQUEUE_IMPL_RESTRICT out,
-                const fqueue* FQUEUE_IMPL_RESTRICT q);
+// Dequeue: initialize *out as `q` without its front element. Fails with
+// FQUEUE_EMPTY (*out is then not even written), FQUEUE_NOMEM or
+// FQUEUE_OVERFLOW.
+FQUEUE_IMPL_NODISCARD
+fqueue_status fqueue_pop(fqueue* FQUEUE_IMPL_RESTRICT out,
+                         const fqueue* FQUEUE_IMPL_RESTRICT q);
 
 #ifdef __cplusplus
 }

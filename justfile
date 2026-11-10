@@ -8,6 +8,7 @@ c-build:
 
 c-test: c-build
     ./build/c/fqueue_test --skip-benchmarks
+    ./build/c/fqueue_limits_test
 
 # C-тесты под AddressSanitizer и UBSan.
 c-asan:
@@ -15,13 +16,15 @@ c-asan:
         -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
         -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" > /dev/null
-    cmake --build build/c-asan --target fqueue_test
+    cmake --build build/c-asan --target fqueue_test fqueue_limits_test
     ./build/c-asan/fqueue_test --skip-benchmarks
+    ./build/c-asan/fqueue_limits_test
 
 # Утечки в C-тестах на macOS, где LeakSanitizer недоступен (на Linux его
 # включает c-asan).
 c-leaks: c-build
     leaks --atExit -- ./build/c/fqueue_test --skip-benchmarks
+    leaks --atExit -- ./build/c/fqueue_limits_test
 
 # --- Rust --------------------------------------------------------------------
 
