@@ -41,9 +41,9 @@ public:
   }
 
   std::optional<int> front() const {
-    option o = fqueue_front(&q_);
-    if (is_none(&o)) return std::nullopt;
-    return o.value;
+    int v;
+    if (!fqueue_front(&q_, &v)) return std::nullopt;
+    return v;
   }
 
   int  size() const { return fqueue_size(&q_); }
@@ -61,9 +61,9 @@ private:
 
 // Value at the front of a queue known to be non-empty.
 static int front_of(const fqueue *q) {
-  option o = fqueue_front(q);
-  REQUIRE(is_some(&o));
-  return o.value;
+  int v;
+  REQUIRE(fqueue_front(q, &v));
+  return v;
 }
 
 // Contents of q front to back; q itself is left untouched. Walks a clone,
@@ -90,8 +90,9 @@ TEST_CASE("fqueue_init produces an empty queue", "[fqueue]") {
 
   REQUIRE(fqueue_is_empty(&q));
   REQUIRE(fqueue_size(&q) == 0);
-  option o = fqueue_front(&q);
-  REQUIRE(is_none(&o));
+  int v = 7;
+  REQUIRE(!fqueue_front(&q, &v));
+  REQUIRE(v == 7); // left untouched
   fqueue_destroy(&q);
 }
 
@@ -415,9 +416,9 @@ static void explore(const fqueue *q, std::deque<int> &model, int depth,
   ++states;
   REQUIRE(fqueue_size(q) == (int)model.size());
   REQUIRE(fqueue_is_empty(q) == model.empty());
-  option o = fqueue_front(q);
-  if (model.empty()) REQUIRE(is_none(&o));
-  else REQUIRE(front_of(q) == model.front());
+  int v;
+  REQUIRE(fqueue_front(q, &v) == !model.empty());
+  if (!model.empty()) REQUIRE(v == model.front());
 
   fqueue c;
   fqueue_clone(&c, q);

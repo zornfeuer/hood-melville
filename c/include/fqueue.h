@@ -22,8 +22,6 @@
 
 #include <stdbool.h>
 
-#include "option.h"
-
 #ifdef __cplusplus
 #define FQUEUE_IMPL_RESTRICT __restrict
 extern "C" {
@@ -104,8 +102,9 @@ bool fqueue_is_empty(const fqueue* q);
 // Number of elements in the queue.
 int fqueue_size(const fqueue* q);
 
-// Return the value at the front of `q`, or none() on an empty queue.
-option fqueue_front(const fqueue* q);
+// Front element: write it to *value and return true; if `q` is empty, return
+// false and leave *value untouched.
+bool fqueue_front(const fqueue* q, int* value);
 
 // Enqueue: initialize *out as `q` with `value` appended to the rear.
 void fqueue_push(fqueue* FQUEUE_IMPL_RESTRICT out,

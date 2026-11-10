@@ -34,8 +34,9 @@ static void phase(const char *name) {
 static uint64_t mix(uint64_t h, int x) { return h * 31 + (uint64_t)x; }
 
 static uint64_t mix_front(uint64_t h, const fqueue *q) {
-  option o = fqueue_front(q);
-  return mix(h, o.value);
+  int v = 0;
+  fqueue_front(q, &v); // вызывается только для непустых
+  return mix(h, v);
 }
 
 // Версии хранятся по значению, как Vec<Queue> в Rust.

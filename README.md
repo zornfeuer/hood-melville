@@ -43,7 +43,8 @@ C — версии хранятся по значению в памяти выз
 fqueue a, b, c;
 fqueue_init(&a);
 fqueue_push(&b, &a, 42);        // a не изменилась
-option o = fqueue_front(&b);    // some(42)
+int x;
+fqueue_front(&b, &x);           // true, x == 42
 fqueue_clone(&c, &b);           // второй владелец той же версии, O(1)
 fqueue_destroy(&a);
 fqueue_destroy(&b);

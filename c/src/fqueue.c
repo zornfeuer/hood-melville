@@ -226,7 +226,8 @@ bool fqueue_pop(fqueue *restrict out, const fqueue *restrict q) {
   return true;
 }
 
-option fqueue_front(const fqueue *q) {
-  if (!q->front) return none();
-  return some(q->front->value);
+bool fqueue_front(const fqueue *q, int *value) {
+  if (!q->front) return false;
+  *value = q->front->value;
+  return true;
 }
