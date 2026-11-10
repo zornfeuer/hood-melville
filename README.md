@@ -35,17 +35,19 @@ Processing Letters*, 1981, 13(2), 50–54](https://doi.org/10.1016/0020-0190(81)
 
 ## Использование
 
-C — API по значению (версии хранятся в памяти вызывающего) или указателей:
+C — версии хранятся по значению в памяти вызывающего, как `Queue` в Rust:
 
 ```c
 #include "fqueue.h"
 
-fqueue a, b;
+fqueue a, b, c;
 fqueue_init(&a);
-fqueue_push_into(&b, &a, 42);   // a не изменилась
+fqueue_push(&b, &a, 42);        // a не изменилась
 option o = fqueue_front(&b);    // some(42)
-fqueue_release(&a);
-fqueue_release(&b);
+fqueue_clone(&c, &b);           // второй владелец той же версии, O(1)
+fqueue_destroy(&a);
+fqueue_destroy(&b);
+fqueue_destroy(&c);
 ```
 
 Rust:

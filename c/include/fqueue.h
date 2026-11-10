@@ -2,22 +2,40 @@
 #define HOOD_MELVILLE_FQUEUE_H
 
 // Functional (persistent) real-time queue of Hood & Melville on six stacks:
-// push, pop and front in worst-case O(1); every operation returns a new
+// push, pop and front in worst-case O(1); every operation writes a new
 // version and leaves its argument unchanged.
+//
+// Versions are values: an `fqueue` lives in storage owned by the caller (a
+// local variable, an array element, a field, ...), and creating a version
+// allocates only queue nodes, never the version itself.
+//
+// Ownership. An initialized `fqueue` owns references to its nodes and must be
+// destroyed exactly once with fqueue_destroy. It may be moved by a bitwise
+// copy, after which the source must not be used until it is initialized
+// again; a bitwise copy is not a second owner — use fqueue_clone for that.
+// For the operations below `out` is uninitialized storage (or a destroyed
+// version) and must not alias `q`.
+//
+// Threads. Versions that share nodes must not be used concurrently, even for
+// reading: reference counts are not atomic. Versions with no common history
+// are independent; the library has no global state.
 
 #include <stdbool.h>
 
 #include "option.h"
 
 #ifdef __cplusplus
+#define FQUEUE_IMPL_RESTRICT __restrict
 extern "C" {
+#else
+#define FQUEUE_IMPL_RESTRICT restrict
 #endif
 
 typedef struct fqueue fqueue;
 
-// Representation. Exposed only so that versions can be stored by value
-// (see the value API below); everything named fqueue_impl_* / FQUEUE_IMPL_*
-// and all fields are private — do not access them.
+// Representation. Exposed only so that versions can be stored by value;
+// everything named fqueue_impl_* / FQUEUE_IMPL_* and all fields are private —
+// do not access them.
 typedef struct fqueue_impl_node fqueue_impl_node;
 
 typedef enum {
@@ -57,8 +75,28 @@ struct fqueue {
   fqueue_impl_rotation rot;
 };
 
-// Create an empty queue.
-fqueue* fqueue_create(void);
+// Complexity: everything except fqueue_destroy is worst-case O(1) (at most 3
+// new nodes per push and 2 per pop). fqueue_destroy is not: it frees every
+// node the version owned exclusively, which can be Theta(n); in total freeing
+// costs no more than node creation, i.e. amortized O(1) per operation. So
+// `fqueue_push(&b, &a, x); fqueue_destroy(&a);` is O(1) for the push but not
+// necessarily for the destroy. Proof: docs/proof.md.
+
+// Initialize *q as an empty queue. Allocates nothing.
+void fqueue_init(fqueue* q);
+
+// Initialize *out as another owner of the version `q`: the same contents,
+// all nodes shared, nothing allocated.
+void fqueue_clone(fqueue* FQUEUE_IMPL_RESTRICT out,
+                  const fqueue* FQUEUE_IMPL_RESTRICT q);
+
+// Release the nodes owned by *q (shared nodes are freed only when no other
+// version references them). Afterwards *q is uninitialized storage, as after
+// a move: it may be passed as `out` or to fqueue_init, nothing else. The
+// storage of *q itself is not freed. Unlike free(), destroying twice is an
+// error — like Rust's drop, and resetting *q measurably slows linear
+// histories (docs/benchmarks.md).
+void fqueue_destroy(fqueue* q);
 
 // Return true iff the queue contains no elements.
 bool fqueue_is_empty(const fqueue* q);
@@ -66,54 +104,17 @@ bool fqueue_is_empty(const fqueue* q);
 // Number of elements in the queue.
 int fqueue_size(const fqueue* q);
 
-// Complexity: fqueue_push, fqueue_pop, fqueue_front, fqueue_size and
-// fqueue_is_empty are worst-case O(1) (at most 3 new nodes per push and 2 per
-// pop). fqueue_free is not: it frees every node the version owned
-// exclusively, which can be Theta(n); in total freeing costs no more than
-// node creation, i.e. amortized O(1) per operation. So
-// `q2 = fqueue_push(q, x); fqueue_free(q);` is O(1) for the push but not
-// necessarily for the free. Proof: docs/proof.md.
-
-// Enqueue: return a new queue with `value` appended to the rear of `q`.
-// `q` itself is not modified.
-fqueue* fqueue_push(const fqueue* q, int value);
-
-// Dequeue: return a new queue without the front element of `q`.
-// `q` itself is not modified. Return NULL on an empty queue.
-fqueue* fqueue_pop(const fqueue* q);
-
 // Return the value at the front of `q`, or none() on an empty queue.
 option fqueue_front(const fqueue* q);
 
-// Free the queue and release all nodes it owns. Shared nodes are freed only
-// when their reference count drops to zero (i.e., when no other queue version
-// holds a reference to them).
-void fqueue_free(fqueue* q);
+// Enqueue: initialize *out as `q` with `value` appended to the rear.
+void fqueue_push(fqueue* FQUEUE_IMPL_RESTRICT out,
+                 const fqueue* FQUEUE_IMPL_RESTRICT q, int value);
 
-// ---------------------------------------------------------------------------
-// Value API: the same persistent operations, but versions live in storage
-// owned by the caller (a local variable, an array element, ...), so creating a
-// version allocates only queue nodes, never the version itself. The pointer
-// API above is a thin wrapper over these functions.
-//
-// Ownership: an initialized fqueue value owns references to its nodes. It may
-// be moved (copied bitwise, after which the source must not be used or
-// released), but not duplicated — releasing two bitwise copies frees shared
-// nodes twice. `out` must not alias `q`. Same complexity as the pointer API.
-// ---------------------------------------------------------------------------
-
-// Initialize *q as an empty queue.
-void fqueue_init(fqueue* q);
-
-// Write into *out a new version: `q` with `value` appended. `q` is unchanged.
-void fqueue_push_into(fqueue* out, const fqueue* q, int value);
-
-// Write into *out a new version: `q` without its front element; `q` is
-// unchanged. Return false (and leave *out untouched) if `q` is empty.
-bool fqueue_pop_into(fqueue* out, const fqueue* q);
-
-// Release the nodes owned by *q; the storage of *q itself is not freed.
-void fqueue_release(fqueue* q);
+// Dequeue: initialize *out as `q` without its front element and return true;
+// if `q` is empty, return false and leave *out untouched.
+bool fqueue_pop(fqueue* FQUEUE_IMPL_RESTRICT out,
+                const fqueue* FQUEUE_IMPL_RESTRICT q);
 
 #ifdef __cplusplus
 }

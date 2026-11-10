@@ -79,48 +79,8 @@ static void rotation_release(rotation *r) {
   r->tag = FQUEUE_IMPL_IDLE;
 }
 
-// Pool of freed fqueue structs, so that a linear history
-// (q2 = fqueue_push(q, x); fqueue_free(q); ...) never reaches malloc: each
-// operation reuses the struct released by the previous fqueue_free.
-// The pool is capped so that freeing many versions at once (all versions of
-// a persistent history) returns memory to the allocator instead of hoarding it.
-// Single-threaded, like the rest of the implementation.
-typedef union fqueue_slot {
-  fqueue             q;
-  union fqueue_slot *next; // valid only while the slot is in the pool
-} fqueue_slot;
-
-enum { FQUEUE_POOL_CAP = 64 };
-
-static fqueue_slot *fqueue_pool     = NULL;
-static int          fqueue_pool_len = 0;
-
-static fqueue *fqueue_alloc(void) {
-  fqueue_slot *s = fqueue_pool;
-  if (s) {
-    fqueue_pool = s->next;
-    fqueue_pool_len--;
-  } else {
-    s = malloc(sizeof(fqueue_slot));
-    if (!s) abort();
-  }
-  return &s->q;
-}
-
-// A pointer to a union member converts back to a pointer to the union.
-static void fqueue_dealloc(fqueue *q) {
-  fqueue_slot *s = (fqueue_slot *)q;
-  if (fqueue_pool_len == FQUEUE_POOL_CAP) {
-    free(s);
-    return;
-  }
-  s->next     = fqueue_pool;
-  fqueue_pool = s;
-  fqueue_pool_len++;
-}
-
 // Make *dst a copy of *src that holds its own references to all shared nodes.
-static void fqueue_copy_into(fqueue *dst, const fqueue *src) {
+static void copy_into(fqueue *restrict dst, const fqueue *restrict src) {
   *dst = *src;
   node_retain(dst->front);
   node_retain(dst->rear);
@@ -213,13 +173,24 @@ void fqueue_init(fqueue *q) {
   q->rot       = (rotation){ .tag = FQUEUE_IMPL_IDLE };
 }
 
+void fqueue_clone(fqueue *restrict out, const fqueue *restrict q) {
+  assert(out != q);
+  copy_into(out, q);
+}
+
+void fqueue_destroy(fqueue *q) {
+  node_release(q->front);
+  node_release(q->rear);
+  rotation_release(&q->rot);
+}
+
 bool fqueue_is_empty(const fqueue *q) { return q->size == 0; }
 
 int fqueue_size(const fqueue *q) { return q->size; }
 
-void fqueue_push_into(fqueue *out, const fqueue *q, int value) {
+void fqueue_push(fqueue *restrict out, const fqueue *restrict q, int value) {
   assert(out != q);
-  fqueue_copy_into(out, q);
+  copy_into(out, q);
   // Replace out->rear (retained by the copy) with cons(value, old_rear).
   node *old_rear = out->rear;
   out->rear = cons(value, old_rear); // cons retains old_rear
@@ -231,10 +202,10 @@ void fqueue_push_into(fqueue *out, const fqueue *q, int value) {
   rotate_step(out); // one step suffices: docs/proof.md
 }
 
-bool fqueue_pop_into(fqueue *out, const fqueue *q) {
+bool fqueue_pop(fqueue *restrict out, const fqueue *restrict q) {
   assert(out != q);
   if (q->size == 0) return false;
-  fqueue_copy_into(out, q);
+  copy_into(out, q);
   // Advance out->front (retained by the copy) to its successor.
   node *old_head = out->front;
   out->front = node_retain(old_head->next); // take ownership of next
@@ -255,40 +226,7 @@ bool fqueue_pop_into(fqueue *out, const fqueue *q) {
   return true;
 }
 
-void fqueue_release(fqueue *q) {
-  node_release(q->front);
-  node_release(q->rear);
-  rotation_release(&q->rot);
-}
-
 option fqueue_front(const fqueue *q) {
   if (!q->front) return none();
   return some(q->front->value);
-}
-
-// Pointer API: each version in its own pooled heap slot.
-
-fqueue *fqueue_create(void) {
-  fqueue *q = fqueue_alloc();
-  fqueue_init(q);
-  return q;
-}
-
-fqueue *fqueue_push(const fqueue *q, int value) {
-  fqueue *q2 = fqueue_alloc();
-  fqueue_push_into(q2, q, value);
-  return q2;
-}
-
-fqueue *fqueue_pop(const fqueue *q) {
-  if (q->size == 0) return NULL;
-  fqueue *q2 = fqueue_alloc();
-  fqueue_pop_into(q2, q);
-  return q2;
-}
-
-void fqueue_free(fqueue *q) {
-  if (!q) return;
-  fqueue_release(q);
-  fqueue_dealloc(q);
 }

@@ -57,7 +57,7 @@ pub struct Queue<T> {
 }
 
 impl<T> Queue<T> {
-    /// Пустая очередь — аналог `fqueue_create`.
+    /// Пустая очередь — аналог `fqueue_init`.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -178,6 +178,7 @@ impl<T: Clone> Queue<T> {
 }
 
 // Вручную: derive потребовал бы `T: Clone`/`T: Default`.
+// `clone` — аналог `fqueue_clone`: O(1), все узлы общие.
 impl<T> Clone for Queue<T> {
     fn clone(&self) -> Self {
         Self {

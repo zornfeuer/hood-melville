@@ -18,6 +18,11 @@ c-asan:
     cmake --build build/c-asan --target fqueue_test
     ./build/c-asan/fqueue_test --skip-benchmarks
 
+# Утечки в C-тестах на macOS, где LeakSanitizer недоступен (на Linux его
+# включает c-asan).
+c-leaks: c-build
+    leaks --atExit -- ./build/c/fqueue_test --skip-benchmarks
+
 # --- Rust --------------------------------------------------------------------
 
 rust-test:

@@ -38,7 +38,7 @@ static uint64_t mix_front(uint64_t h, const fqueue *q) {
   return mix(h, o.value);
 }
 
-// Версии хранятся по значению (API fqueue_*_into), как Vec<Queue> в Rust.
+// Версии хранятся по значению, как Vec<Queue> в Rust.
 
 // Линейная история: два буфера; новая версия пишется в свободный, старая
 // освобождается сразу после операции.
@@ -50,14 +50,14 @@ typedef struct {
 static const fqueue *cur(const linear *l) { return &l->buf[l->cur]; }
 
 static void lin_push(linear *l, int value) {
-  fqueue_push_into(&l->buf[l->cur ^ 1], &l->buf[l->cur], value);
-  fqueue_release(&l->buf[l->cur]);
+  fqueue_push(&l->buf[l->cur ^ 1], &l->buf[l->cur], value);
+  fqueue_destroy(&l->buf[l->cur]);
   l->cur ^= 1;
 }
 
 static void lin_pop(linear *l) {
-  fqueue_pop_into(&l->buf[l->cur ^ 1], &l->buf[l->cur]);
-  fqueue_release(&l->buf[l->cur]);
+  fqueue_pop(&l->buf[l->cur ^ 1], &l->buf[l->cur]);
+  fqueue_destroy(&l->buf[l->cur]);
   l->cur ^= 1;
 }
 
@@ -74,7 +74,7 @@ static uint64_t run_fill(int n) {
     lin_pop(&q);
   }
   phase("drain");
-  fqueue_release(&q.buf[q.cur]);
+  fqueue_destroy(&q.buf[q.cur]);
   return h;
 }
 
@@ -96,7 +96,7 @@ static uint64_t run_mixed(int n) {
     lin_pop(&q);
   }
   phase("drain");
-  fqueue_release(&q.buf[q.cur]);
+  fqueue_destroy(&q.buf[q.cur]);
   return h;
 }
 
@@ -121,19 +121,19 @@ static const fqueue *last(const versions *v) { return &v->items[v->len - 1]; }
 
 static void keep_push(versions *v, int value) {
   fqueue *out = next_slot(v);
-  fqueue_push_into(out, last(v), value);
+  fqueue_push(out, last(v), value);
   v->len++;
 }
 
 static void keep_pop(versions *v) {
   fqueue *out = next_slot(v);
-  fqueue_pop_into(out, last(v));
+  fqueue_pop(out, last(v));
   v->len++;
 }
 
 static void destroy(versions *v) {
   for (size_t k = 0; k < v->len; ++k)
-    fqueue_release(&v->items[k]);
+    fqueue_destroy(&v->items[k]);
   free(v->items);
 }
 
@@ -184,13 +184,13 @@ static uint64_t run_branching(int n) {
     fqueue *child = next_slot(&v);
     const fqueue *parent = &v.items[idx];
     if (fqueue_is_empty(parent)) {
-      fqueue_push_into(child, parent, k);
+      fqueue_push(child, parent, k);
     } else {
       h = mix_front(h, parent);
       if ((x >> 40) % 3 == 0)
-        fqueue_pop_into(child, parent);
+        fqueue_pop(child, parent);
       else
-        fqueue_push_into(child, parent, k);
+        fqueue_push(child, parent, k);
     }
     heads[slot] = v.len++;
   }
