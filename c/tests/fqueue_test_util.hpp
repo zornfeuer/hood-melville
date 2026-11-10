@@ -87,19 +87,18 @@ inline int front_of(const fqueue *q) {
   return v;
 }
 
-// Contents of q front to back; q itself is left untouched. Walks a clone,
-// moving each new version into `cur` bitwise.
+// Contents of q front to back, through the iterator; q itself is untouched.
 inline std::vector<int> contents(const fqueue *q) {
   std::vector<int> out;
-  fqueue cur, next;
-  REQUIRE(fqueue_clone(&cur, q) == FQUEUE_OK);
-  while (!fqueue_is_empty(&cur)) {
-    out.push_back(front_of(&cur));
-    REQUIRE(fqueue_pop(&next, &cur) == FQUEUE_OK);
-    fqueue_destroy(&cur);
-    cur = next;
-  }
-  fqueue_destroy(&cur);
+  fqueue_iter it;
+  REQUIRE(fqueue_iter_init(&it, q) == FQUEUE_OK);
+  int v;
+  fqueue_status s;
+  while ((s = fqueue_iter_next(&it, &v)) == FQUEUE_OK)
+    out.push_back(v);
+  fqueue_iter_destroy(&it);
+  REQUIRE(s == FQUEUE_EMPTY);
+  REQUIRE(out.size() == fqueue_size(q));
   return out;
 }
 

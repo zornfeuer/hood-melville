@@ -1,6 +1,6 @@
 # Функциональная очередь Hood–Melville: C и Rust — методика сравнения и результаты
 
-Реализации: `c/src/fqueue.c` (C) и `rust/` (крейт `hood-melville`). Доказательство
+Реализации: `c/include/fqueue_template.h` (C, экземпляр для `int` — `c/src/fqueue.c`) и `rust/` (крейт `hood-melville`). Доказательство
 достаточности одного шага ротации — `docs/proof.md`.
 
 ## Методика

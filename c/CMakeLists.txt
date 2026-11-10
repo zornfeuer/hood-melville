@@ -17,7 +17,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 enable_testing()
-add_executable(fqueue_test tests/fqueue_test.cxx)
+add_executable(fqueue_test tests/fqueue_test.cxx tests/fqueue_generic_test.cxx
+    tests/fqueue_generic.c)
 target_link_libraries(fqueue_test PRIVATE fqueue Catch2::Catch2WithMain)
 add_test(NAME fqueue_test COMMAND fqueue_test --skip-benchmarks)
 

@@ -15,7 +15,7 @@ Processing Letters*, 1981, 13(2), 50–54](https://doi.org/10.1016/0020-0190(81)
 
 | путь | содержимое |
 |---|---|
-| `c/` | библиотека на C17 (`include/fqueue.h`, `src/fqueue.c`), тесты на Catch2, нагрузка для бенчмарков |
+| `c/` | библиотека на C17: шаблон `include/fqueue_template.h` для любого типа элемента, экземпляр для `int` (`include/fqueue.h`, `src/fqueue.c`), тесты на Catch2, нагрузка для бенчмарков |
 | `rust/` | крейт `hood-melville`; `unsafe` только в `src/node.rs` (свой счётчик ссылок в узле), проверяется Miri |
 | `bench/compare.py` | сравнение бинарников: чередование запусков, режимы аллокатора, несколько раскладок кода, бутстреп-интервалы |
 | `docs/proof.md` | доказательство корректности и worst-case O(1) при одном шаге ротации на операцию |
@@ -57,6 +57,21 @@ fqueue_destroy(&b);
 счётчика ссылок возвращаются как `fqueue_status`, аргумент при этом не
 меняется. В Rust те же ситуации, как принято в языке, — паника (`push` в
 очередь из `u32::MAX` элементов) или `abort` (переполнение счётчика, OOM).
+
+Очередь для своего типа элемента — экземпляр шаблона (элементы копируются
+присваиванием, как в klib):
+
+```c
+// strq.h                          // strq.c
+#define FQUEUE_NAME strq           #include "strq.h"
+#define FQUEUE_T    const char *   #define FQUEUE_NAME strq
+#include "fqueue_template.h"       #define FQUEUE_T    const char *
+                                   #define FQUEUE_IMPLEMENTATION
+                                   #include "fqueue_template.h"
+```
+
+Получаются тип `strq` и функции `strq_init`, `strq_push`, `strq_pop`,
+`strq_front`, `strq_clone`, `strq_destroy`, итератор `strq_iter_*`.
 
 Rust:
 

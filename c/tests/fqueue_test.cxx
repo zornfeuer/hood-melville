@@ -273,6 +273,46 @@ TEST_CASE("fqueue_clone shares contents and outlives the original",
   fqueue_destroy(&c);
 }
 
+TEST_CASE("fqueue_iter: empty queue, end of iteration, outliving the version",
+          "[fqueue]") {
+  int v = 7;
+  fqueue_iter it;
+  {
+    Q empty;
+    REQUIRE(fqueue_iter_init(&it, empty.get()) == FQUEUE_OK);
+  }
+  REQUIRE(fqueue_iter_next(&it, &v) == FQUEUE_EMPTY);
+  REQUIRE(v == 7); // left untouched
+  fqueue_iter_destroy(&it);
+
+  // The iterator owns a clone: the version may go away while iterating, in
+  // the middle of a rotation too.
+  std::vector<int> expected;
+  {
+    Q q;
+    for (int i = 0; i < 9; ++i)
+      q = q.push(i);
+    q = *q.pop();
+    expected = contents(q);
+    REQUIRE(fqueue_iter_init(&it, q.get()) == FQUEUE_OK);
+    REQUIRE(fqueue_iter_next(&it, &v) == FQUEUE_OK);
+    REQUIRE(v == expected[0]);
+  }
+  std::vector<int> rest;
+  while (fqueue_iter_next(&it, &v) == FQUEUE_OK)
+    rest.push_back(v);
+  REQUIRE(rest == std::vector<int>(expected.begin() + 1, expected.end()));
+  REQUIRE(fqueue_iter_next(&it, &v) == FQUEUE_EMPTY); // stays at the end
+  fqueue_iter_destroy(&it);
+
+  // Destroying an iterator before the end releases its clone.
+  Q q = Q().push(1).push(2).push(3);
+  REQUIRE(fqueue_iter_init(&it, q.get()) == FQUEUE_OK);
+  REQUIRE(fqueue_iter_next(&it, &v) == FQUEUE_OK);
+  fqueue_iter_destroy(&it);
+  REQUIRE(contents(q) == std::vector<int>{1, 2, 3});
+}
+
 TEST_CASE("fqueue_destroy leaves storage reusable as out or for init",
           "[fqueue]") {
   fqueue q, q1;

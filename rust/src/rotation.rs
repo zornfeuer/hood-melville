@@ -1,7 +1,7 @@
 //! Инкрементальная ротация Hood–Melville: пошаговое построение
 //! `new_front = front ++ reverse(rear)`.
 //!
-//! Аналог `rotation` / `rotate_step` / `finish_rotation` из `c/src/fqueue.c`.
+//! Аналог `rotation` / `rotate_step` / `finish_rotation` из `c/include/fqueue_template.h`.
 //! Вместо tagged union — enum с данными; шаг меняет состояние на месте
 //! (`step_mut(&mut self)`), как `rotate_step` в C. Готовый фронт возвращается
 //! из шага, а состояние сразу становится `Idle`.

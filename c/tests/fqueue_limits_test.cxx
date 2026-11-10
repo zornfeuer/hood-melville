@@ -278,3 +278,44 @@ TEST_CASE("random operations on many shared versions never overflow",
   }
   REQUIRE(live == start);
 }
+
+TEST_CASE("an iterator step that runs out of memory can be retried",
+          "[limits]") {
+  long start = live;
+  {
+    // A long queue whose versions all stay alive, so that the iterator's pops
+    // share nodes and rotate.
+    std::vector<Q> versions(1);
+    for (int i = 0; i < TEST_LEN_LIMIT; ++i)
+      versions.push_back(i % 3 == 2 ? *versions.back().pop()
+                                    : versions.back().push(i));
+    const Q &q = versions.back();
+    std::vector<int> expected = contents(q);
+
+    fqueue_iter it;
+    REQUIRE(fqueue_iter_init(&it, q.get()) == FQUEUE_OK);
+    std::vector<int> got;
+    long failures = 0;
+    for (;;) {
+      int v = -1;
+      long before = live;
+      arm(failures % 3); // fail the first, second or third allocation
+      fqueue_status s = fqueue_iter_next(&it, &v);
+      disarm();
+      if (injected) {
+        REQUIRE(s == FQUEUE_NOMEM);
+        REQUIRE(v == -1);
+        REQUIRE(live == before);
+        ++failures;
+        continue; // retry the same step
+      }
+      if (s == FQUEUE_EMPTY) break;
+      REQUIRE(s == FQUEUE_OK);
+      got.push_back(v);
+    }
+    fqueue_iter_destroy(&it);
+    REQUIRE(got == expected);
+    REQUIRE(failures > 0);
+  }
+  REQUIRE(live == start);
+}

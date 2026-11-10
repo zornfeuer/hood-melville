@@ -1,4 +1,4 @@
-//! Функциональная очередь Hood–Melville — аналог `fqueue` из `c/src/fqueue.c`.
+//! Функциональная очередь Hood–Melville — аналог `fqueue` из `c/include/fqueue_template.h`.
 
 use std::fmt;
 use std::iter::FusedIterator;

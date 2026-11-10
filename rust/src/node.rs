@@ -1,5 +1,6 @@
 //! Узел персистентного стека со встроенным счётчиком ссылок — аналог `node`
-//! и `node_retain`/`node_release` из `c/src/fqueue.c`.
+//! и `node_retain`/`node_release` из `c/include/fqueue_template.h`
+//! (`*_impl_retain`/`*_impl_release`).
 //!
 //! Вместо `Rc<Node<T>>` (счётчики strong и weak по 8 байт снаружи узла —
 //! 32 байта для `T = i32`) счётчик `u32` лежит в самом узле, рядом со
