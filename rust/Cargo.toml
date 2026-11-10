@@ -1,0 +1,31 @@
+[package]
+name = "hood-melville"
+version = "0.1.0"
+edition = "2024"
+description = "Persistent real-time queue of Hood and Melville: worst-case O(1) push, pop and front"
+repository = "https://github.com/zornfeuer/hood-melville"
+keywords = ["queue", "persistent", "functional", "immutable", "data-structures"]
+categories = ["data-structures"]
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.8.2"
+dhat = "0.3.3"
+proptest = "1.12.0"
+
+[[test]]
+name = "alloc"
+harness = false
+
+[[bench]]
+name = "queue"
+harness = false
+
+# Максимальная оптимизация для сравнения с C (`just bench-compare`);
+# target-cpu=native передаётся через RUSTFLAGS.
+[profile.max]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

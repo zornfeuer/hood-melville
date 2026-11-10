@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  c:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build and test
+        run: |
+          cmake -S c -B build/c
+          cmake --build build/c
+          ./build/c/fqueue_test --skip-benchmarks
+      - name: test under ASan/UBSan
+        run: |
+          cmake -S c -B build/c-asan -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build/c-asan --target fqueue_test
+          ./build/c-asan/fqueue_test --skip-benchmarks
+
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -W clippy::pedantic -D warnings
+      - run: cargo test
+      - run: cargo test --release
+
+  miri:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - run: cargo miri test --lib --test scenarios --test model --test branching
+      - run: cargo miri test --lib
+        env:
+          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-strict-provenance
