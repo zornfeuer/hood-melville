@@ -7,9 +7,7 @@
 #include <queue>
 #include <vector>
 
-extern "C" {
 #include "fqueue.h"
-}
 
 // Drain the queue into a vector by advancing through pop. The original pointer
 // is not modified (functional semantics), so the caller still holds a valid

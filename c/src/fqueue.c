@@ -4,14 +4,14 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
-struct fqueue_node {
-  int                 value;
-  int                 refcount;
-  struct fqueue_node *next;
+struct fqueue_impl_node {
+  int                      value;
+  int                      refcount;
+  struct fqueue_impl_node *next;
 };
 
-typedef struct fqueue_node node;
-typedef fqueue_rotation    rotation;
+typedef struct fqueue_impl_node node;
+typedef fqueue_impl_rotation rotation;
 
 // Increment refcount; NULL-safe. Returns n for chaining.
 static node *node_retain(node *n) {
@@ -47,14 +47,14 @@ static node *cons(int value, node *next) {
 // Retain all node pointers held by a rotation, based on its current tag.
 static void rotation_retain(const rotation *r) {
   switch (r->tag) {
-  case FQ_IDLE: break;
-  case FQ_REVERSING:
+  case FQUEUE_IMPL_IDLE: break;
+  case FQUEUE_IMPL_REVERSING:
     node_retain(r->reversing.acc);
     node_retain(r->reversing.rfacc);
     node_retain(r->reversing.old_front);
     node_retain(r->reversing.old_rear);
     break;
-  case FQ_APPENDING:
+  case FQUEUE_IMPL_APPENDING:
     node_retain(r->appending.acc);
     node_retain(r->appending.rfacc);
     break;
@@ -64,19 +64,19 @@ static void rotation_retain(const rotation *r) {
 // Release all node pointers held by a rotation and reset it to IDLE.
 static void rotation_release(rotation *r) {
   switch (r->tag) {
-  case FQ_IDLE: break;
-  case FQ_REVERSING:
+  case FQUEUE_IMPL_IDLE: break;
+  case FQUEUE_IMPL_REVERSING:
     node_release(r->reversing.acc);
     node_release(r->reversing.rfacc);
     node_release(r->reversing.old_front);
     node_release(r->reversing.old_rear);
     break;
-  case FQ_APPENDING:
+  case FQUEUE_IMPL_APPENDING:
     node_release(r->appending.acc);
     node_release(r->appending.rfacc);
     break;
   }
-  r->tag = FQ_IDLE;
+  r->tag = FQUEUE_IMPL_IDLE;
 }
 
 // Pool of freed fqueue structs, so that a linear history
@@ -143,7 +143,7 @@ static void cons_prepend(node **dst, int value) {
 }
 
 static void start_rotation(fqueue *q) {
-  q->rot.tag                 = FQ_REVERSING;
+  q->rot.tag                 = FQUEUE_IMPL_REVERSING;
   // old_front shares front's node list — give old_front its own reference.
   q->rot.reversing.old_front = node_retain(q->front);
   // old_rear takes ownership of rear; rear pointer is cleared.
@@ -161,14 +161,14 @@ static void finish_rotation(fqueue *q) {
   q->front     = q->rot.appending.acc;   // acc ownership transferred to front
   node_release(q->rot.appending.rfacc);  // abandon leftover rfacc (ok==0 case)
   q->front_len = q->size - q->rear_len;
-  q->rot.tag   = FQ_IDLE;
+  q->rot.tag   = FQUEUE_IMPL_IDLE;
 }
 
 // One step of the ongoing rotation. Modifies q in place (q is already a fresh copy).
 static void rotate_step(fqueue *q) {
-  if (q->rot.tag == FQ_IDLE) return;
+  if (q->rot.tag == FQUEUE_IMPL_IDLE) return;
 
-  if (q->rot.tag == FQ_REVERSING) {
+  if (q->rot.tag == FQUEUE_IMPL_REVERSING) {
     cons_prepend(&q->rot.reversing.acc,   q->rot.reversing.old_rear->value);
     q->rot.reversing.old_rear = node_advance(q->rot.reversing.old_rear);
 
@@ -183,13 +183,13 @@ static void rotate_step(fqueue *q) {
     node *acc   = q->rot.reversing.acc;
     node *rfacc = q->rot.reversing.rfacc;
     int   ok    = q->rot.reversing.ok;
-    q->rot.tag             = FQ_APPENDING;
+    q->rot.tag             = FQUEUE_IMPL_APPENDING;
     q->rot.appending.acc   = acc;
     q->rot.appending.rfacc = rfacc;
     q->rot.appending.ok    = ok;
   }
 
-  // FQ_APPENDING
+  // FQUEUE_IMPL_APPENDING
   // Complete immediately:
   //   rfacc == NULL → naturally exhausted all old_front elements
   //   ok == 0       → all remaining steps are no-ops (elements already popped)
@@ -210,7 +210,7 @@ void fqueue_init(fqueue *q) {
   q->rear_len  = 0;
   q->front     = NULL;
   q->rear      = NULL;
-  q->rot       = (rotation){ .tag = FQ_IDLE };
+  q->rot       = (rotation){ .tag = FQUEUE_IMPL_IDLE };
 }
 
 bool fqueue_is_empty(const fqueue *q) { return q->size == 0; }
@@ -226,7 +226,7 @@ void fqueue_push_into(fqueue *out, const fqueue *q, int value) {
   node_release(old_rear);            // release the copy's retain
   out->rear_len++;
   out->size++;
-  if (out->rot.tag == FQ_IDLE && out->rear_len > out->front_len)
+  if (out->rot.tag == FQUEUE_IMPL_IDLE && out->rear_len > out->front_len)
     start_rotation(out);
   rotate_step(out); // one step suffices: docs/proof.md
 }
@@ -242,10 +242,10 @@ bool fqueue_pop_into(fqueue *out, const fqueue *q) {
   out->front_len--;
   out->size--;
   // During a rotation ok >= 1 here (lemma 2 in docs/proof.md).
-  if (out->rot.tag == FQ_REVERSING) {
+  if (out->rot.tag == FQUEUE_IMPL_REVERSING) {
     assert(out->rot.reversing.ok > 0);
     out->rot.reversing.ok--;
-  } else if (out->rot.tag == FQ_APPENDING) {
+  } else if (out->rot.tag == FQUEUE_IMPL_APPENDING) {
     assert(out->rot.appending.ok > 0);
     out->rot.appending.ok--;
   } else if (out->rear_len > out->front_len) {
@@ -268,19 +268,19 @@ option fqueue_front(const fqueue *q) {
 
 // Pointer API: each version in its own pooled heap slot.
 
-fqueue *fqueue_create() {
+fqueue *fqueue_create(void) {
   fqueue *q = fqueue_alloc();
   fqueue_init(q);
   return q;
 }
 
-fqueue *fqueue_push(fqueue *q, int value) {
+fqueue *fqueue_push(const fqueue *q, int value) {
   fqueue *q2 = fqueue_alloc();
   fqueue_push_into(q2, q, value);
   return q2;
 }
 
-fqueue *fqueue_pop(fqueue *q) {
+fqueue *fqueue_pop(const fqueue *q) {
   if (q->size == 0) return NULL;
   fqueue *q2 = fqueue_alloc();
   fqueue_pop_into(q2, q);

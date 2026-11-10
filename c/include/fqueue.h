@@ -9,47 +9,56 @@
 
 #include "option.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct fqueue fqueue;
 
 // Representation. Exposed only so that versions can be stored by value
-// (see the value API below); fields are private — do not access them.
-typedef struct fqueue_node fqueue_node;
+// (see the value API below); everything named fqueue_impl_* / FQUEUE_IMPL_*
+// and all fields are private — do not access them.
+typedef struct fqueue_impl_node fqueue_impl_node;
 
-typedef enum { FQ_IDLE, FQ_REVERSING, FQ_APPENDING } fqueue_phase;
-
-typedef struct {
-  fqueue_node *acc;
-  fqueue_node *rfacc;
-  fqueue_node *old_front;
-  fqueue_node *old_rear;
-  int          ok;
-} fqueue_reversing;
+typedef enum {
+  FQUEUE_IMPL_IDLE,
+  FQUEUE_IMPL_REVERSING,
+  FQUEUE_IMPL_APPENDING
+} fqueue_impl_phase;
 
 typedef struct {
-  fqueue_node *acc;
-  fqueue_node *rfacc;
-  int          ok;
-} fqueue_appending;
+  fqueue_impl_node *acc;
+  fqueue_impl_node *rfacc;
+  fqueue_impl_node *old_front;
+  fqueue_impl_node *old_rear;
+  int               ok;
+} fqueue_impl_reversing;
 
 typedef struct {
-  fqueue_phase tag;
+  fqueue_impl_node *acc;
+  fqueue_impl_node *rfacc;
+  int               ok;
+} fqueue_impl_appending;
+
+typedef struct {
+  fqueue_impl_phase tag;
   union {
-    fqueue_reversing reversing;
-    fqueue_appending appending;
+    fqueue_impl_reversing reversing;
+    fqueue_impl_appending appending;
   };
-} fqueue_rotation;
+} fqueue_impl_rotation;
 
 struct fqueue {
-  int             size;
-  int             front_len;
-  int             rear_len;
-  fqueue_node    *front;
-  fqueue_node    *rear;
-  fqueue_rotation rot;
+  int                  size;
+  int                  front_len;
+  int                  rear_len;
+  fqueue_impl_node    *front;
+  fqueue_impl_node    *rear;
+  fqueue_impl_rotation rot;
 };
 
 // Create an empty queue.
-fqueue* fqueue_create();
+fqueue* fqueue_create(void);
 
 // Return true iff the queue contains no elements.
 bool fqueue_is_empty(const fqueue* q);
@@ -67,11 +76,11 @@ int fqueue_size(const fqueue* q);
 
 // Enqueue: return a new queue with `value` appended to the rear of `q`.
 // `q` itself is not modified.
-fqueue* fqueue_push(fqueue* q, int value);
+fqueue* fqueue_push(const fqueue* q, int value);
 
 // Dequeue: return a new queue without the front element of `q`.
 // `q` itself is not modified. Return NULL on an empty queue.
-fqueue* fqueue_pop(fqueue* q);
+fqueue* fqueue_pop(const fqueue* q);
 
 // Return the value at the front of `q`, or none() on an empty queue.
 option fqueue_front(const fqueue* q);
@@ -105,5 +114,9 @@ bool fqueue_pop_into(fqueue* out, const fqueue* q);
 
 // Release the nodes owned by *q; the storage of *q itself is not freed.
 void fqueue_release(fqueue* q);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // HOOD_MELVILLE_FQUEUE_H
