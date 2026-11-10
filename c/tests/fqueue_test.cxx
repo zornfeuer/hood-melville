@@ -46,8 +46,8 @@ public:
     return v;
   }
 
-  int  size() const { return fqueue_size(&q_); }
-  bool empty() const { return fqueue_is_empty(&q_); }
+  size_t size() const { return fqueue_size(&q_); }
+  bool   empty() const { return fqueue_is_empty(&q_); }
 
   const fqueue *get() const { return &q_; }
 
@@ -154,14 +154,14 @@ TEST_CASE("fqueue preserves FIFO order for sequential push then pop",
 TEST_CASE("fqueue_size and fqueue_is_empty are consistent", "[fqueue]") {
   Q q;
 
-  for (int i = 0; i < 8; ++i) {
+  for (size_t i = 0; i < 8; ++i) {
     REQUIRE(q.size() == i);
     REQUIRE(q.empty() == (i == 0));
-    q = q.push(i * 10);
+    q = q.push((int)i * 10);
   }
   REQUIRE(q.size() == 8);
 
-  for (int remaining = 8; remaining > 0; --remaining) {
+  for (size_t remaining = 8; remaining > 0; --remaining) {
     REQUIRE(q.size() == remaining);
     REQUIRE(!q.empty());
     q = *q.pop();
@@ -302,7 +302,7 @@ TEST_CASE("fqueue stress: 200 operations match a reference std::queue",
     ref.push(i * 100);
 
     REQUIRE(q.front() == ref.front());
-    REQUIRE(q.size() == (int)ref.size());
+    REQUIRE(q.size() == ref.size());
     q = *q.pop();
     ref.pop();
   }
@@ -310,7 +310,7 @@ TEST_CASE("fqueue stress: 200 operations match a reference std::queue",
   // Phase 3: drain both queues in lockstep.
   while (!ref.empty()) {
     REQUIRE(!q.empty());
-    REQUIRE(q.size() == (int)ref.size());
+    REQUIRE(q.size() == ref.size());
     REQUIRE(q.front() == ref.front());
     q = *q.pop();
     ref.pop();
@@ -390,7 +390,7 @@ TEST_CASE("fqueue branching history stored by value matches a reference model",
     }
 
     REQUIRE(contents(parent) == before); // the parent is unchanged
-    REQUIRE(fqueue_size(&child) == (int)model.size());
+    REQUIRE(fqueue_size(&child) == model.size());
     if (!model.empty()) REQUIRE(front_of(&child) == model.front());
     max_len = std::max(max_len, model.size());
     heads[slot] = versions.size();
@@ -414,7 +414,7 @@ TEST_CASE("fqueue branching history stored by value matches a reference model",
 static void explore(const fqueue *q, std::deque<int> &model, int depth,
                     long &states) {
   ++states;
-  REQUIRE(fqueue_size(q) == (int)model.size());
+  REQUIRE(fqueue_size(q) == model.size());
   REQUIRE(fqueue_is_empty(q) == model.empty());
   int v;
   REQUIRE(fqueue_front(q, &v) == !model.empty());

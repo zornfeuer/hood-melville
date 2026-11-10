@@ -21,6 +21,8 @@
 // are independent; the library has no global state.
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 #define FQUEUE_IMPL_RESTRICT __restrict
@@ -36,6 +38,11 @@ typedef struct fqueue fqueue;
 // do not access them.
 typedef struct fqueue_impl_node fqueue_impl_node;
 
+// Lengths and the rotation counter `ok`; the same type as `Len` in Rust. A
+// queue holds at most FQUEUE_IMPL_LEN_MAX elements (checked in fqueue_push).
+typedef uint32_t fqueue_impl_len;
+#define FQUEUE_IMPL_LEN_MAX UINT32_MAX
+
 typedef enum {
   FQUEUE_IMPL_IDLE,
   FQUEUE_IMPL_REVERSING,
@@ -47,13 +54,13 @@ typedef struct {
   fqueue_impl_node *rfacc;
   fqueue_impl_node *old_front;
   fqueue_impl_node *old_rear;
-  int               ok;
+  fqueue_impl_len   ok;
 } fqueue_impl_reversing;
 
 typedef struct {
   fqueue_impl_node *acc;
   fqueue_impl_node *rfacc;
-  int               ok;
+  fqueue_impl_len   ok;
 } fqueue_impl_appending;
 
 typedef struct {
@@ -65,9 +72,9 @@ typedef struct {
 } fqueue_impl_rotation;
 
 struct fqueue {
-  int                  size;
-  int                  front_len;
-  int                  rear_len;
+  fqueue_impl_len      size;
+  fqueue_impl_len      front_len;
+  fqueue_impl_len      rear_len;
   fqueue_impl_node    *front;
   fqueue_impl_node    *rear;
   fqueue_impl_rotation rot;
@@ -100,13 +107,14 @@ void fqueue_destroy(fqueue* q);
 bool fqueue_is_empty(const fqueue* q);
 
 // Number of elements in the queue.
-int fqueue_size(const fqueue* q);
+size_t fqueue_size(const fqueue* q);
 
 // Front element: write it to *value and return true; if `q` is empty, return
 // false and leave *value untouched.
 bool fqueue_front(const fqueue* q, int* value);
 
-// Enqueue: initialize *out as `q` with `value` appended to the rear.
+// Enqueue: initialize *out as `q` with `value` appended to the rear. Aborts
+// if `q` already holds FQUEUE_IMPL_LEN_MAX elements.
 void fqueue_push(fqueue* FQUEUE_IMPL_RESTRICT out,
                  const fqueue* FQUEUE_IMPL_RESTRICT q, int value);
 

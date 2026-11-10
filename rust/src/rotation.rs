@@ -15,7 +15,7 @@ use std::mem;
 
 use crate::stack::Stack;
 
-/// Тип длин и счётчика `ok` (см. поля `Queue`).
+/// Тип длин и счётчика `ok` (см. поля `Queue`); в C — `fqueue_impl_len`.
 pub(crate) type Len = u32;
 
 /// Состояние ротации. Хранит четыре из шести стеков очереди.

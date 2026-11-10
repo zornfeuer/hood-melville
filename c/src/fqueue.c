@@ -2,21 +2,27 @@
 
 #include <assert.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 struct fqueue_impl_node {
   int                      value;
-  int                      refcount;
+  uint32_t                 refcount;
   struct fqueue_impl_node *next;
 };
 
 typedef struct fqueue_impl_node node;
 typedef fqueue_impl_rotation rotation;
 
-// Increment refcount; NULL-safe. Returns n for chaining.
+// Increment refcount; NULL-safe. Returns n for chaining. Aborts on overflow
+// (more than UINT32_MAX references to one node), like NodePtr::clone in Rust:
+// overwriting a version without destroying it leaks its references, so the
+// count can overflow without UB in the caller.
 static node *node_retain(node *n) {
-  if (n)
+  if (n) {
+    if (n->refcount == UINT32_MAX) abort();
     n->refcount++;
+  }
   return n;
 }
 
@@ -28,7 +34,7 @@ static node *node_retain(node *n) {
 static void node_release(node *n) {
   while (n && --n->refcount == 0) {
     node *next = n->next;
-    if (next) (void)*(volatile int *)&next->refcount;
+    if (next) (void)*(volatile uint32_t *)&next->refcount;
     free(n);
     n = next;
   }
@@ -97,7 +103,7 @@ static node *node_advance(node *n) {
   if (!n) return NULL;
   node *next = n->next;
   if (n->refcount == 1) {
-    if (next) (void)*(volatile int *)&next->refcount;
+    if (next) (void)*(volatile uint32_t *)&next->refcount;
     free(n);
     return next;
   }
@@ -148,9 +154,9 @@ static void rotate_step(fqueue *q) {
     if (q->rot.reversing.old_rear != NULL) return;
 
     // Transition to APPENDING: extract fields before overwriting the union.
-    node *acc   = q->rot.reversing.acc;
-    node *rfacc = q->rot.reversing.rfacc;
-    int   ok    = q->rot.reversing.ok;
+    node           *acc   = q->rot.reversing.acc;
+    node           *rfacc = q->rot.reversing.rfacc;
+    fqueue_impl_len ok    = q->rot.reversing.ok;
     q->rot.tag             = FQUEUE_IMPL_APPENDING;
     q->rot.appending.acc   = acc;
     q->rot.appending.rfacc = rfacc;
@@ -194,10 +200,11 @@ void fqueue_destroy(fqueue *q) {
 
 bool fqueue_is_empty(const fqueue *q) { return q->size == 0; }
 
-int fqueue_size(const fqueue *q) { return q->size; }
+size_t fqueue_size(const fqueue *q) { return q->size; }
 
 void fqueue_push(fqueue *restrict out, const fqueue *restrict q, int value) {
   assert(out != q);
+  if (q->size == FQUEUE_IMPL_LEN_MAX) abort();
   copy_into(out, q);
   cons_prepend(&out->rear, value); // the copy's reference to rear moves in
   out->rear_len++;

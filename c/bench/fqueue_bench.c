@@ -85,7 +85,7 @@ static uint64_t run_mixed(int n) {
   int i = 0;
   linear q = {.cur = 0};
   fqueue_init(&q.buf[0]);
-  while (fqueue_size(cur(&q)) < n) {
+  while (fqueue_size(cur(&q)) < (size_t)n) {
     lin_push(&q, i++);
     lin_push(&q, i++);
     h = mix_front(h, cur(&q));
@@ -145,7 +145,7 @@ static uint64_t run_persistent(int n) {
   versions v = {0};
   fqueue_init(next_slot(&v));
   v.len = 1;
-  while (fqueue_size(last(&v)) < n) {
+  while (fqueue_size(last(&v)) < (size_t)n) {
     keep_push(&v, i++);
     keep_push(&v, i++);
     h = mix_front(h, last(&v));
