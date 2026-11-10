@@ -3,6 +3,7 @@ name = "hood-melville"
 version = "0.1.0"
 edition = "2024"
 description = "Persistent real-time queue of Hood and Melville: worst-case O(1) push, pop and front"
+license = "MIT"
 repository = "https://github.com/zornfeuer/hood-melville"
 keywords = ["queue", "persistent", "functional", "immutable", "data-structures"]
 categories = ["data-structures"]
