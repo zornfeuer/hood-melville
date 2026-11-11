@@ -47,9 +47,10 @@ fn run_fill(n: i32, ph: &mut Phases) -> u64 {
         q = q.push(i);
     }
     ph.mark("build");
-    while let Some(next) = q.pop() {
+    // Как в C: сначала голова, затем pop.
+    while !q.is_empty() {
         h = mix_front(h, &q);
-        q = next;
+        q = q.pop().expect("очередь не пуста");
     }
     ph.mark("drain");
     h
@@ -71,9 +72,10 @@ fn run_mixed(n: i32, ph: &mut Phases) -> u64 {
         q = q.pop().unwrap();
     }
     ph.mark("build");
-    while let Some(next) = q.pop() {
+    // Как в C: сначала голова, затем pop.
+    while !q.is_empty() {
         h = mix_front(h, &q);
-        q = next;
+        q = q.pop().expect("очередь не пуста");
     }
     ph.mark("drain");
     h
@@ -137,8 +139,9 @@ fn run_persistent(n: i32, ph: &mut Phases) -> u64 {
         versions.push(next);
     }
     ph.mark("build");
-    while let Some(next) = last(&versions).pop() {
+    while !last(&versions).is_empty() {
         h = mix_front(h, last(&versions));
+        let next = last(&versions).pop().expect("версия не пуста");
         versions.push(next);
     }
     ph.mark("drain");
