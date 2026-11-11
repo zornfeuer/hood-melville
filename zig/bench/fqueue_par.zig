@@ -4,8 +4,12 @@
 //!
 //! Использование:
 //!   fqueue_par share <pool|threads> <share> <P>
-//!     pool — `std.Io.Group` поверх `std.Io.Threaded` (пул из P - 1 рабочих
-//!     потоков; когда все заняты, задачу выполняет вызывающий, итого P);
+//!     pool — пул `std.Io.Threaded`: P - 1 рабочих (`Group.concurrent`) и
+//!     вызывающий берут номера задач из общего атомарного счётчика —
+//!     динамическая раздача, как `schedule(dynamic)` в OpenMP. Готового
+//!     параллельного цикла в std Zig 0.16 нет (`std.Thread.Pool` удалён), и
+//!     задача на элемент через `Group.async` не годится: при занятом пуле её
+//!     выполняет вызывающий, и раздача стоит (#7);
 //!     threads — `std.Thread.spawn`, задачи разбиты между P потоками заранее.
 //!     Печатает контрольную сумму и время параллельной фазы, нс.
 //!   fqueue_par snapshot <R>
@@ -80,20 +84,43 @@ fn runTaskOrPanic(shared: *const Shared, share: u64, t: u64) u64 {
     return runTask(shared, share, t) catch |err| std.debug.panic("fqueue: {s}", .{@errorName(err)});
 }
 
-fn poolTask(shared: *const Shared, share: u64, t: u64, out: *u64) void {
-    out.* = runTaskOrPanic(shared, share, t);
+const Work = struct {
+    shared: *const Shared,
+    share: u64,
+    next: std.atomic.Value(usize) = .init(0),
+    results: [tasks]u64 = undefined,
+};
+
+fn poolWorker(work: *Work) void {
+    while (true) {
+        const t = work.next.fetchAdd(1, .monotonic);
+        if (t >= tasks) return;
+        work.results[t] = runTaskOrPanic(work.shared, work.share, t);
+    }
 }
 
+fn idle() void {}
+
 fn runPool(shared: *const Shared, share: u64, p: usize, elapsed: *i96) !u64 {
-    var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = .limited(p - 1) });
+    // Параллельность задаёт число задач (P - 1 рабочих и вызывающий), а не
+    // concurrent_limit: с пределом P - 1 рабочие прогрева, ещё не отмеченные
+    // свободными, изредка давали ConcurrencyUnavailable.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
     const io = threaded.io();
-    var results: [tasks]u64 = undefined;
+    // Потоки пула создаются до замера, как у OpenMP и rayon.
+    var warmup: std.Io.Group = .init;
+    for (1..p) |_| try warmup.concurrent(io, idle, .{});
+    try warmup.await(io);
+
+    var work: Work = .{ .shared = shared, .share = share };
     const t0 = std.Io.Clock.awake.now(io);
     var group: std.Io.Group = .init;
-    for (&results, 0..) |*out, t| group.async(io, poolTask, .{ shared, share, t, out });
+    for (1..p) |_| try group.concurrent(io, poolWorker, .{&work});
+    poolWorker(&work);
     try group.await(io);
     elapsed.* = t0.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
+    const results = work.results;
     var h: u64 = 0;
     for (results) |r| h +%= r;
     return h;
