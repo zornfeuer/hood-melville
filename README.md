@@ -15,9 +15,9 @@ Processing Letters*, 1981, 13(2), 50–54](https://doi.org/10.1016/0020-0190(81)
 
 | путь | содержимое |
 |---|---|
-| `c/` | библиотека на C17: шаблон `include/fqueue_template.h` для любого типа элемента, экземпляр для `int` (`include/fqueue.h`, `src/fqueue.c`), тесты на Catch2, нагрузка для бенчмарков |
-| `rust/` | крейт `hood-melville`; `unsafe` только в `src/node.rs` (свой счётчик ссылок в узле), проверяется Miri |
-| `zig/` | третья реализация на Zig 0.16 (идиоматичная, ещё не оптимизированная): `Queue(T)` с явным аллокатором и ошибками через error union, тесты с проверкой утечек и отказа каждой аллокации, та же нагрузка |
+| `c/` | библиотека на C17: шаблон `include/fqueue_template.h` для любого типа элемента, экземпляры для `int` — `fqueue` и потокобезопасный `fqueue_sync` (`include/fqueue.h`, `src/fqueue.c`), тесты на Catch2, нагрузка для бенчмарков |
+| `rust/` | крейт `hood-melville`: `Queue<T>` и потокобезопасная `SyncQueue<T>` (общий код, параметр счётчика `refcount::{Local, Atomic}`); `unsafe` только в `src/node.rs` (свой счётчик ссылок в узле), проверяется Miri |
+| `zig/` | третья реализация на Zig 0.16 (идиоматичная, ещё не оптимизированная): `Queue(T)` и потокобезопасная `SyncQueue(T)` с явным аллокатором и ошибками через error union, тесты с проверкой утечек и отказа каждой аллокации, та же нагрузка |
 | `bench/compare.py` | сравнение бинарников: чередование запусков, режимы аллокатора, несколько раскладок кода, бутстреп-интервалы |
 | `docs/proof.md` | доказательство корректности и worst-case O(1) при одном шаге ротации на операцию |
 | `docs/benchmarks.md` | методика измерений, журнал оптимизаций (что принято и что отклонено), результаты |
@@ -30,6 +30,12 @@ Processing Letters*, 1981, 13(2), 50–54](https://doi.org/10.1016/0020-0190(81)
   (`push_mut`/`pop_mut` в Rust, `fqueue_push_in_place`/`fqueue_pop_in_place`
   в C): без копирования версии и освобождения старой, другие версии не
   затрагиваются.
+- В каждой библиотеке два варианта с одинаковым API: однопоточный (`Queue`,
+  `fqueue`, `Queue(T)`) и потокобезопасный на атомарных счётчиках ссылок
+  (`SyncQueue`, `fqueue_sync`, `SyncQueue(T)`): версию могут читать и
+  порождать из неё новые версии сразу несколько потоков, узлы разделяются
+  между потоками. Проверки: Miri (Rust, с поиском гонок данных), ThreadSanitizer
+  (C), многопоточные модельные тесты во всех трёх языках.
 - Worst-case O(1) на построение версии и доступ: не больше 3 новых узлов на
   `push` и 2 на `pop`; для обобщённого `T` — плюс не более двух `T::clone`.
 - Уничтожение версии **не** O(1) в худшем случае: освобождается всё, чем она
@@ -104,6 +110,23 @@ let mut q = q2.clone();
 q.push_mut(3);                    // на месте; q2 не изменилась
 assert_eq!(q.pop_mut(), Some(2));
 ```
+
+Потокобезопасный вариант — `SyncQueue<T>` (`Send + Sync` при `T: Send + Sync`):
+
+```rust
+use hood_melville::SyncQueue;
+
+let base: SyncQueue<i32> = (1..=3).collect();
+std::thread::scope(|s| {
+    for i in 0..4 {
+        let base = &base;
+        s.spawn(move || assert_eq!(base.push(i).len(), 4)); // base общий
+    }
+});
+```
+
+В C — `fqueue_sync` с тем же API (`fqueue_sync_push`, …), в Zig —
+`SyncQueue(T)`.
 
 ## Результаты (Apple M5, 4 раскладки кода × 8 раундов)
 
@@ -191,6 +214,7 @@ target_link_libraries(app PRIVATE hood_melville::fqueue)
 ```
 just test                    # C- и Rust-тесты
 just c-asan                  # C-тесты под ASan/UBSan
+just c-tsan                  # многопоточные C-тесты под ThreadSanitizer
 just c-leaks                 # C-тесты под leaks (macOS)
 just c-install-check         # установка C-библиотеки и пример через find_package
 just rust-lint               # rustfmt + clippy::pedantic
@@ -199,6 +223,7 @@ just zig-test                # Zig-тесты (zig build test)
 just zig-lint                # zig fmt --check
 just bench-compare-layouts   # сравнение C и Rust (несколько минут)
 just bench-compare-mut       # то же для операций на месте
+just bench-compare-sync      # цена потокобезопасных вариантов в одном потоке
 ```
 
 ## Происхождение

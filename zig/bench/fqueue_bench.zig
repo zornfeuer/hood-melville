@@ -1,5 +1,5 @@
 const std = @import("std");
-const Q = @import("fqueue").Queue(i32);
+const Q = if (@import("bench_options").sync) @import("fqueue").SyncQueue(i32) else @import("fqueue").Queue(i32);
 const allocator = std.heap.c_allocator;
 
 const Scenario = enum { fill, mixed, persistent, branching, fill_mut, mixed_mut };

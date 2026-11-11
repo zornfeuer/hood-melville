@@ -4,6 +4,7 @@ use std::fmt;
 use std::iter::FusedIterator;
 use std::mem;
 
+use crate::refcount::{Atomic, Local, RefCount};
 use crate::rotation::{Len, Rotation};
 
 /// Шагов ротации на операцию. Одного достаточно — доказательство в
@@ -43,7 +44,7 @@ use crate::stack::Stack;
 /// assert_eq!(q2.front(), Some(&2));
 /// assert!(q2.pop().unwrap().pop().is_none());
 /// ```
-pub struct Queue<T> {
+pub struct Queue<T, R: RefCount = Local> {
     // u32, а не usize, и `ok` здесь, а не в `Rotation`: структура — 64
     // байта, одна строка кэша (с usize — 88, с `ok` в ротации — 72). Предел —
     // u32::MAX элементов, переполнение проверяется в `push_mut`.
@@ -53,16 +54,69 @@ pub struct Queue<T> {
     /// Счётчик `ok` текущей ротации (см. `Rotation`); вне ротации — 0.
     ok: Len,
     /// Голова — первый элемент очереди; отсюда `pop`.
-    front: Stack<T>,
+    front: Stack<T, R>,
     /// Голова — последний добавленный элемент; сюда `push`.
-    rear: Stack<T>,
-    rot: Rotation<T>,
+    rear: Stack<T, R>,
+    rot: Rotation<T, R>,
 }
+
+/// Потокобезопасная персистентная очередь: та же [`Queue`] с атомарным
+/// счётчиком ссылок в узлах (как `Arc` против `Rc`).
+///
+/// `SyncQueue<T>` — `Send + Sync` при `T: Send + Sync`: версию можно передать
+/// другому потоку или разделять между потоками, а потоки — параллельно
+/// порождать из общих версий новые (`push`, `pop`, `clone`) и читать их.
+/// Изменение на месте (`push_mut`, `pop_mut`) — как и любое `&mut`, только у
+/// владельца этой версии; её узлы при этом могут разделяться с версиями других
+/// потоков. Цена — атомарные операции над счётчиками: в одном потоке
+/// `SyncQueue` медленнее `Queue`.
+///
+/// ```
+/// use hood_melville::SyncQueue;
+/// use std::thread;
+///
+/// let base: SyncQueue<i32> = (1..=3).collect();
+/// thread::scope(|s| {
+///     for i in 0..4 {
+///         let base = &base;
+///         s.spawn(move || {
+///             let q = base.push(10 + i).pop().unwrap();
+///             assert_eq!(q.iter().collect::<Vec<_>>(), [2, 3, 10 + i]);
+///         });
+///     }
+/// });
+/// assert_eq!(base.len(), 3);
+/// ```
+///
+/// Однопоточную [`Queue`] передать в другой поток нельзя:
+///
+/// ```compile_fail
+/// let q = hood_melville::Queue::new().push(1);
+/// std::thread::spawn(move || q.len());
+/// ```
+pub type SyncQueue<T> = Queue<T, Atomic>;
 
 impl<T> Queue<T> {
     /// Пустая очередь — аналог `fqueue_init`.
     #[must_use]
     pub const fn new() -> Self {
+        Self::empty()
+    }
+}
+
+impl<T> SyncQueue<T> {
+    /// Пустая потокобезопасная очередь.
+    ///
+    /// Отдельное имя, как `new_sync` в `rpds`: с одним `new` на оба варианта
+    /// `Queue::new()` без аннотации типа перестал бы выводиться.
+    #[must_use]
+    pub const fn new_sync() -> Self {
+        Self::empty()
+    }
+}
+
+impl<T, R: RefCount> Queue<T, R> {
+    const fn empty() -> Self {
         Self {
             len: 0,
             front_len: 0,
@@ -95,7 +149,7 @@ impl<T> Queue<T> {
     }
 }
 
-impl<T: Clone> Queue<T> {
+impl<T: Clone, R: RefCount> Queue<T, R> {
     /// Новая очередь с `value` в конце — аналог `fqueue_push`.
     #[must_use]
     #[inline]
@@ -123,7 +177,7 @@ impl<T: Clone> Queue<T> {
     /// Не заимствует очередь: работает над её O(1)-копией через `pop`, поэтому
     /// каждый шаг — O(1) в худшем случае, а элементы выдаются клонами.
     #[must_use]
-    pub fn iter(&self) -> Iter<T> {
+    pub fn iter(&self) -> Iter<T, R> {
         Iter(self.clone())
     }
 
@@ -203,7 +257,7 @@ impl<T: Clone> Queue<T> {
     /// встраивал персистентный `pop` — лишняя копия `Option<Queue>`, +9
     /// инструкций на операцию.
     #[inline]
-    fn pop_front_with<R>(&mut self, take: impl FnOnce(&mut Stack<T>) -> Option<R>) -> Option<R> {
+    fn pop_front_with<V>(&mut self, take: impl FnOnce(&mut Stack<T, R>) -> Option<V>) -> Option<V> {
         let taken = take(&mut self.front)?;
         self.front_len -= 1;
         self.len -= 1;
@@ -244,7 +298,7 @@ impl<T: Clone> Queue<T> {
 
     /// Установить новый фронт по завершении ротации — аналог `finish_rotation`.
     #[inline]
-    fn install_front(&mut self, front: Stack<T>) {
+    fn install_front(&mut self, front: Stack<T, R>) {
         self.front = front;
         self.front_len = self.len - self.rear_len;
     }
@@ -252,7 +306,7 @@ impl<T: Clone> Queue<T> {
 
 // Вручную: derive потребовал бы `T: Clone`/`T: Default`.
 // `clone` — аналог `fqueue_clone`: O(1), все узлы общие.
-impl<T> Clone for Queue<T> {
+impl<T, R: RefCount> Clone for Queue<T, R> {
     #[inline]
     fn clone(&self) -> Self {
         Self {
@@ -267,13 +321,13 @@ impl<T> Clone for Queue<T> {
     }
 }
 
-impl<T> Default for Queue<T> {
+impl<T, R: RefCount> Default for Queue<T, R> {
     fn default() -> Self {
-        Self::new()
+        Self::empty()
     }
 }
 
-impl<T: Clone + fmt::Debug> fmt::Debug for Queue<T> {
+impl<T: Clone + fmt::Debug, R: RefCount> fmt::Debug for Queue<T, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self).finish()
     }
@@ -281,17 +335,17 @@ impl<T: Clone + fmt::Debug> fmt::Debug for Queue<T> {
 
 /// Равенство по содержимому: внутреннее устройство (фаза ротации, раскладка
 /// по стекам) у равных очередей может различаться.
-impl<T: Clone + PartialEq> PartialEq for Queue<T> {
+impl<T: Clone + PartialEq, R: RefCount> PartialEq for Queue<T, R> {
     fn eq(&self, other: &Self) -> bool {
         self.len == other.len && self.iter().eq(other.iter())
     }
 }
 
-impl<T: Clone + Eq> Eq for Queue<T> {}
+impl<T: Clone + Eq, R: RefCount> Eq for Queue<T, R> {}
 
-impl<T: Clone> FromIterator<T> for Queue<T> {
+impl<T: Clone, R: RefCount> FromIterator<T> for Queue<T, R> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut q = Self::new();
+        let mut q = Self::empty();
         q.extend(iter);
         q
     }
@@ -299,7 +353,7 @@ impl<T: Clone> FromIterator<T> for Queue<T> {
 
 /// Добавляет элементы в эту версию; другие версии, разделяющие с ней узлы,
 /// не меняются.
-impl<T: Clone> Extend<T> for Queue<T> {
+impl<T: Clone, R: RefCount> Extend<T> for Queue<T, R> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         for value in iter {
             self.push_mut(value);
@@ -308,9 +362,9 @@ impl<T: Clone> Extend<T> for Queue<T> {
 }
 
 /// Итератор по элементам очереди — см. [`Queue::iter`].
-pub struct Iter<T>(Queue<T>);
+pub struct Iter<T, R: RefCount = Local>(Queue<T, R>);
 
-impl<T: Clone> Iterator for Iter<T> {
+impl<T: Clone, R: RefCount> Iterator for Iter<T, R> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
@@ -322,30 +376,30 @@ impl<T: Clone> Iterator for Iter<T> {
     }
 }
 
-impl<T: Clone> ExactSizeIterator for Iter<T> {}
+impl<T: Clone, R: RefCount> ExactSizeIterator for Iter<T, R> {}
 
-impl<T: Clone> FusedIterator for Iter<T> {}
+impl<T: Clone, R: RefCount> FusedIterator for Iter<T, R> {}
 
-impl<T> Clone for Iter<T> {
+impl<T, R: RefCount> Clone for Iter<T, R> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<T: Clone> IntoIterator for Queue<T> {
+impl<T: Clone, R: RefCount> IntoIterator for Queue<T, R> {
     type Item = T;
-    type IntoIter = Iter<T>;
+    type IntoIter = Iter<T, R>;
 
-    fn into_iter(self) -> Iter<T> {
+    fn into_iter(self) -> Iter<T, R> {
         Iter(self)
     }
 }
 
-impl<T: Clone> IntoIterator for &Queue<T> {
+impl<T: Clone, R: RefCount> IntoIterator for &Queue<T, R> {
     type Item = T;
-    type IntoIter = Iter<T>;
+    type IntoIter = Iter<T, R>;
 
-    fn into_iter(self) -> Iter<T> {
+    fn into_iter(self) -> Iter<T, R> {
         self.iter()
     }
 }
@@ -355,7 +409,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    impl<T> Queue<T> {
+    impl<T, R: RefCount> Queue<T, R> {
         /// Структурные инварианты; O(n), только для тестов.
         fn check_invariants(&self) {
             assert_eq!(self.front.iter().count(), self.front_len as usize);
@@ -377,7 +431,7 @@ mod tests {
         }
     }
 
-    fn contents<T: Clone>(q: &Queue<T>) -> Vec<T> {
+    fn contents<T: Clone, R: RefCount>(q: &Queue<T, R>) -> Vec<T> {
         q.iter().collect()
     }
 

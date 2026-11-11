@@ -16,6 +16,21 @@
 
 #include "fqueue.h"
 
+// С -DFQUEUE_BENCH_SYNC — та же нагрузка на fqueue_sync (атомарные счётчики
+// ссылок): цена потокобезопасности в одном потоке (`just bench-compare-sync`).
+#ifdef FQUEUE_BENCH_SYNC
+#define fqueue               fqueue_sync
+#define fqueue_init          fqueue_sync_init
+#define fqueue_destroy       fqueue_sync_destroy
+#define fqueue_is_empty      fqueue_sync_is_empty
+#define fqueue_size          fqueue_sync_size
+#define fqueue_front         fqueue_sync_front
+#define fqueue_push          fqueue_sync_push
+#define fqueue_pop           fqueue_sync_pop
+#define fqueue_push_in_place fqueue_sync_push_in_place
+#define fqueue_pop_in_place  fqueue_sync_pop_in_place
+#endif
+
 static int      phases_on;
 static uint64_t phase_t0;
 

@@ -26,6 +26,13 @@ jobs:
           cmake --build build/c-asan --target fqueue_test fqueue_limits_test
           ./build/c-asan/fqueue_test --skip-benchmarks
           ./build/c-asan/fqueue_limits_test
+      - name: multithreaded tests under ThreadSanitizer
+        run: |
+          cmake -S c -B build/c-tsan -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=thread" -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build build/c-tsan --target fqueue_test
+          ./build/c-tsan/fqueue_test "[sync]"
       - name: install as a package and use it
         run: |
           cmake -S c -B build/c-pkg -DBUILD_SHARED_LIBS=ON -DHOOD_MELVILLE_BUILD_TESTS=OFF \
@@ -61,7 +68,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri, rust-src
-      - run: cargo miri test --lib --test scenarios --test model --test branching
+      - run: cargo miri test --lib --test scenarios --test model --test branching --test sync
       - run: cargo miri test --lib
         env:
           MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-strict-provenance

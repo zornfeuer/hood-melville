@@ -9,9 +9,23 @@ pub fn Queue(comptime T: type) type {
     return QueueWithOptions(T, .{});
 }
 
+/// Потокобезопасные узлы: неизменяемую структуру версии можно читать и
+/// порождать из неё версии в разных потоках. pushInPlace/popInPlace/deinit
+/// требуют единоличного владения самой структурой; узлы могут разделяться.
+/// T должен допускать параллельное чтение. Копия значения переносит владение;
+/// для независимого владения нужен clone; аллокатор общий и потокобезопасный.
+/// Предел ссылок мягкий: clone и персистентные операции возвращают Overflow
+/// и откатывают приобретённые ссылки. Быстрые операции на месте могут немного
+/// превысить предел под гонками; запас 2³¹ до переполнения достаточен для
+/// любого реального числа одновременно работающих потоков.
+pub fn SyncQueue(comptime T: type) type {
+    return QueueWithOptions(T, .{ .atomic = true, .refs_limit = std.math.maxInt(u32) / 2 });
+}
+
 /// Настройки предела ссылок, в том числе для проверки переполнения.
 pub const Options = struct {
-    /// Максимальное число владеющих ссылок на узел.
+    atomic: bool = false,
+    /// Предел владеющих ссылок; для atomic мягкий (см. SyncQueue).
     refs_limit: u32 = std.math.maxInt(u32),
 };
 
@@ -22,7 +36,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
         const Self = @This();
         const Node = struct {
             value: T,
-            refs: u32 = 1,
+            refs: if (options.atomic) std.atomic.Value(u32) else u32 = if (options.atomic) .init(1) else 1,
             next: ?*@This(),
         };
 
@@ -71,25 +85,62 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             return if (self.front_stack) |n| n.value else null;
         }
 
-        fn retain(n: ?*Node) Error!void {
+        fn refCount(n: *Node, comptime order: std.builtin.AtomicOrder) u32 {
+            return if (options.atomic) n.refs.load(order) else n.refs;
+        }
+
+        fn setRefs(n: *Node, refs: u32) void {
+            if (options.atomic) n.refs.store(refs, .monotonic) else n.refs = refs;
+        }
+
+        fn retainMode(n: ?*Node, comptime unchecked: bool) Error!void {
             if (n) |p| {
-                if (p.refs == options.refs_limit) return error.Overflow;
-                p.refs += 1;
+                if (options.atomic) {
+                    // Как Arc: существующая ссылка обеспечивает жизнь узла,
+                    // поэтому приобретению новой достаточно relaxed.
+                    const old = p.refs.fetchAdd(1, .monotonic);
+                    if (!unchecked and old >= options.refs_limit) {
+                        _ = dropRef(p);
+                        return error.Overflow;
+                    }
+                } else {
+                    if (p.refs == options.refs_limit) return error.Overflow;
+                    p.refs += 1;
+                }
             }
+        }
+
+        fn retain(n: ?*Node) Error!void {
+            return retainMode(n, false);
         }
 
         fn touch(n: ?*Node) void {
             if (n) |p| {
-                const refs: *volatile u32 = &p.refs;
-                _ = refs.*;
+                if (options.atomic) {
+                    _ = p.refs.load(.monotonic);
+                } else {
+                    const refs: *volatile u32 = &p.refs;
+                    _ = refs.*;
+                }
             }
+        }
+
+        fn dropRef(n: *Node) bool {
+            if (options.atomic) {
+                if (n.refs.fetchSub(1, .release) != 1) return false;
+                // Как Arc: release публикует предшествующие обращения, а
+                // acquire перед чтением полей/освобождением видит все drop.
+                _ = n.refs.load(.acquire);
+                return true;
+            }
+            n.refs -= 1;
+            return n.refs == 0;
         }
 
         fn release(allocator: Allocator, head: ?*Node) void {
             var cur = head;
             while (cur) |n| {
-                n.refs -= 1;
-                if (n.refs != 0) break;
+                if (!dropRef(n)) break;
                 cur = n.next;
                 touch(cur);
                 allocator.destroy(n);
@@ -103,18 +154,24 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             dst.* = n;
         }
 
-        fn advance(allocator: Allocator, dst: *?*Node) Error!void {
+        fn advanceMode(allocator: Allocator, dst: *?*Node, comptime unchecked: bool) Error!void {
             const n = dst.* orelse return;
+            // Acquire наблюдает предыдущих владельцев перед чтением полей.
+            const unique = refCount(n, .acquire) == 1;
             const next = n.next;
-            if (n.refs == 1) {
+            if (unique) {
                 touch(next);
                 allocator.destroy(n);
             } else {
                 // При переполнении ссылка остаётся у исходного поля.
-                try retain(next);
-                n.refs -= 1;
+                try retainMode(next, unchecked);
+                if (options.atomic) release(allocator, n) else n.refs -= 1;
             }
             dst.* = next;
+        }
+
+        fn advance(allocator: Allocator, dst: *?*Node) Error!void {
+            return advanceMode(allocator, dst, false);
         }
 
         /// Освободить ссылки версии; после вызова значение не определено.
@@ -154,7 +211,9 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             }
             var acquired: usize = 0;
             errdefer for (nodes[0..acquired]) |n| {
-                if (n) |p| p.refs -= 1;
+                if (n) |p| {
+                    _ = dropRef(p); // Исходная версия всё ещё владеет ссылкой.
+                }
             };
             for (nodes) |n| {
                 try retain(n);
@@ -163,8 +222,8 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             return self;
         }
 
-        fn start(self: *Self) Error!void {
-            try retain(self.front_stack);
+        fn start(self: *Self, comptime unchecked: bool) Error!void {
+            try retainMode(self.front_stack, unchecked);
             self.rot = .{ .reversing = .{ .old_front = self.front_stack, .old_rear = self.rear } };
             self.ok = self.front_len;
             self.rear = null;
@@ -181,15 +240,15 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             self.ok = 0;
         }
 
-        fn step(self: *Self, allocator: Allocator, pool: ?*Pool) Error!void {
+        fn step(self: *Self, allocator: Allocator, pool: ?*Pool, comptime unchecked: bool) Error!void {
             switch (self.rot) {
                 .idle => {},
                 .reversing => |*s| {
                     try prepend(allocator, &s.acc, s.old_rear.?.value, pool);
-                    try advance(allocator, &s.old_rear);
+                    try advanceMode(allocator, &s.old_rear, unchecked);
                     if (s.old_front) |n| {
                         try prepend(allocator, &s.rfront, n.value, pool);
-                        try advance(allocator, &s.old_front);
+                        try advanceMode(allocator, &s.old_front, unchecked);
                     }
                     if (s.old_rear == null) {
                         std.debug.assert(s.old_front == null);
@@ -200,7 +259,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
                 },
                 .appending => |*s| {
                     try prepend(allocator, &s.acc, s.rfront.?.value, pool);
-                    try advance(allocator, &s.rfront);
+                    try advanceMode(allocator, &s.rfront, unchecked);
                     self.ok -= 1;
                     if (self.ok == 0) self.finish(allocator);
                 },
@@ -215,8 +274,8 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             try prepend(allocator, &q.rear, value, null);
             q.size += 1;
             q.rear_len += 1;
-            if (q.rot == .idle and q.rear_len > q.front_len) try q.start();
-            try q.step(allocator, null);
+            if (q.rot == .idle and q.rear_len > q.front_len) try q.start(false);
+            try q.step(allocator, null, false);
             return q;
         }
 
@@ -231,8 +290,8 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             if (q.rot != .idle) {
                 q.ok -= 1;
                 if (q.rot == .appending and q.ok == 0) q.finish(allocator);
-            } else if (q.rear_len > q.front_len) try q.start();
-            try q.step(allocator, null);
+            } else if (q.rear_len > q.front_len) try q.start(false);
+            try q.step(allocator, null, false);
             return q;
         }
 
@@ -273,7 +332,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
         fn nextNearLimit(node: ?*Node) bool {
             const n = node orelse return false;
             const next = n.next orelse return false;
-            return next.refs > options.refs_limit - 2;
+            return refCount(next, .monotonic) > options.refs_limit - 2;
         }
 
         // За операцию один узел получает не больше двух новых ссылок:
@@ -281,7 +340,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
         // Проверка консервативна; вблизи предела точный откат даёт slow path.
         fn nearLimit(self: Self) bool {
             if (self.front_stack) |n| {
-                if (n.refs > options.refs_limit - 2 or nextNearLimit(n) or nextNearLimit(n.next)) return true;
+                if (refCount(n, .monotonic) > options.refs_limit - 2 or nextNearLimit(n) or nextNearLimit(n.next)) return true;
             }
             if (nextNearLimit(self.rear)) return true;
             return switch (self.rot) {
@@ -309,12 +368,13 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             var pool = try Pool.init(allocator, 1 + stepAllocs(rotation, self.ok));
             defer pool.deinit(allocator);
 
-            // После подготовки пула и запаса ссылок ошибок уже быть не может.
+            // После подготовки пула ошибок нет. В atomic режиме инкременты
+            // неотказывающие: предпроверка предела не защищает от гонок.
             prepend(allocator, &self.rear, value, &pool) catch unreachable;
             self.size += 1;
             self.rear_len += 1;
-            if (starting) self.start() catch unreachable;
-            self.step(allocator, &pool) catch unreachable;
+            if (starting) self.start(options.atomic) catch unreachable;
+            self.step(allocator, &pool, options.atomic) catch unreachable;
             std.debug.assert(pool.count == 0);
         }
 
@@ -337,14 +397,14 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             var pool = try Pool.init(allocator, stepAllocs(rotation, ok));
             defer pool.deinit(allocator);
 
-            advance(allocator, &self.front_stack) catch unreachable;
+            advanceMode(allocator, &self.front_stack, options.atomic) catch unreachable;
             self.size -= 1;
             self.front_len -= 1;
             if (self.rot != .idle) {
                 self.ok -= 1;
                 if (self.rot == .appending and self.ok == 0) self.finish(allocator);
-            } else if (starting) self.start() catch unreachable;
-            self.step(allocator, &pool) catch unreachable;
+            } else if (starting) self.start(options.atomic) catch unreachable;
+            self.step(allocator, &pool, options.atomic) catch unreachable;
             std.debug.assert(pool.count == 0);
             return value;
         }
@@ -375,150 +435,187 @@ test {
     _ = @import("tests.zig");
 }
 
-test "размер узла, перенос хвоста и переполнение" {
-    const Q = Queue(i32);
-    const a = std.testing.allocator;
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(Q.Node));
-    try std.testing.expectEqual(@as(usize, 72), @sizeOf(Q));
-    var head: ?*Q.Node = null;
-    defer Q.release(a, head);
-    try Q.prepend(a, &head, 1, null);
-    const tail = head.?;
-    try Q.prepend(a, &head, 2, null);
-    try std.testing.expectEqual(@as(u32, 1), tail.refs);
-    try Q.advance(a, &head);
-    try std.testing.expect(head == tail);
-    try std.testing.expectEqual(@as(u32, 1), tail.refs);
-    var q = try Q.init().push(a, 7);
-    defer q.deinit(a);
-    q.size = std.math.maxInt(u32);
-    try std.testing.expectError(error.Overflow, q.push(a, 8));
-    try std.testing.expectError(error.Overflow, q.pushInPlace(a, 8));
-    q.size = 1;
-    q.front_stack.?.refs = std.math.maxInt(u32);
-    try std.testing.expectError(error.Overflow, q.clone());
-    try std.testing.expectError(error.Overflow, q.pop(a));
-    q.front_stack.?.refs = 1;
-    // clone должен откатить первую ссылку, если следующее поле переполнено.
-    try q.pushInPlace(a, 8);
-    const original = q.front_stack.?.refs;
-    q.rear.?.refs = std.math.maxInt(u32);
-    try std.testing.expectError(error.Overflow, q.clone());
-    try std.testing.expectEqual(original, q.front_stack.?.refs);
-    q.rear.?.refs = 1;
-    // Shared advance не расходует голову при переполнении хвоста.
-    try Q.prepend(a, &head, 3, null);
-    head.?.refs = 2;
-    tail.refs = std.math.maxInt(u32);
-    const before = head;
-    try std.testing.expectError(error.Overflow, Q.advance(a, &head));
-    try std.testing.expectEqual(before, head);
-    head.?.refs = 1;
-    tail.refs = 1;
-}
+fn InternalSuite(comptime atomic: bool) type {
+    return struct {
+        const limit = if (atomic) std.math.maxInt(u32) / 2 else std.math.maxInt(u32);
+        // размер узла, перенос хвоста и переполнение
+        fn nodeLayoutAndOverflow() !void {
+            const Q = QueueWithOptions(i32, .{ .atomic = atomic, .refs_limit = limit });
+            const a = std.testing.allocator;
+            try std.testing.expectEqual(@as(usize, 16), @sizeOf(Q.Node));
+            try std.testing.expectEqual(@as(usize, 72), @sizeOf(Q));
+            var head: ?*Q.Node = null;
+            defer Q.release(a, head);
+            try Q.prepend(a, &head, 1, null);
+            const tail = head.?;
+            try Q.prepend(a, &head, 2, null);
+            try std.testing.expectEqual(@as(u32, 1), Q.refCount(tail, .monotonic));
+            try Q.advance(a, &head);
+            try std.testing.expect(head == tail);
+            try std.testing.expectEqual(@as(u32, 1), Q.refCount(tail, .monotonic));
+            var q = try Q.init().push(a, 7);
+            defer q.deinit(a);
+            q.size = std.math.maxInt(u32);
+            try std.testing.expectError(error.Overflow, q.push(a, 8));
+            try std.testing.expectError(error.Overflow, q.pushInPlace(a, 8));
+            q.size = 1;
+            Q.setRefs(q.front_stack.?, limit);
+            try std.testing.expectError(error.Overflow, q.clone());
+            try std.testing.expectError(error.Overflow, q.pop(a));
+            Q.setRefs(q.front_stack.?, 1);
+            // clone должен откатить первую ссылку, если следующее поле переполнено.
+            try q.pushInPlace(a, 8);
+            const original = Q.refCount(q.front_stack.?, .monotonic);
+            Q.setRefs(q.rear.?, limit);
+            try std.testing.expectError(error.Overflow, q.clone());
+            try std.testing.expectEqual(original, Q.refCount(q.front_stack.?, .monotonic));
+            Q.setRefs(q.rear.?, 1);
+            // Shared advance не расходует голову при переполнении хвоста.
+            try Q.prepend(a, &head, 3, null);
+            Q.setRefs(head.?, 2);
+            Q.setRefs(tail, limit);
+            const before = head;
+            try std.testing.expectError(error.Overflow, Q.advance(a, &head));
+            try std.testing.expectEqual(before, head);
+            Q.setRefs(head.?, 1);
+            Q.setRefs(tail, 1);
+        }
 
-test "малый предел ссылок: запасной путь, переполнение и откат" {
-    const Q = QueueWithOptions(i32, .{ .refs_limit = 8 });
-    const a = std.testing.allocator;
-    for (1..40) |size| {
-        var q = Q.init();
-        defer q.deinit(a);
-        for (0..size) |i| try q.pushInPlace(a, @intCast(i));
-        var copies: [8]Q = undefined;
-        var count: usize = 0;
-        defer for (copies[0..count]) |*copy| copy.deinit(a);
-        while (true) {
-            const copy = q.clone() catch |err| {
-                try std.testing.expectEqual(error.Overflow, err);
-                break;
+        // малый предел ссылок: запасной путь, переполнение и откат
+        fn smallRefsLimit() !void {
+            const Q = QueueWithOptions(i32, .{ .atomic = atomic, .refs_limit = 8 });
+            const a = std.testing.allocator;
+            for (1..40) |size| {
+                var q = Q.init();
+                defer q.deinit(a);
+                for (0..size) |i| try q.pushInPlace(a, @intCast(i));
+                var copies: [8]Q = undefined;
+                var count: usize = 0;
+                defer for (copies[0..count]) |*copy| copy.deinit(a);
+                while (true) {
+                    const copy = q.clone() catch |err| {
+                        try std.testing.expectEqual(error.Overflow, err);
+                        break;
+                    };
+                    copies[count] = copy;
+                    count += 1;
+                }
+                const before = q;
+                const refs = Q.refCount(q.front_stack.?, .monotonic);
+                try std.testing.expectError(error.Overflow, q.pushInPlace(a, 99));
+                try std.testing.expectError(error.Overflow, q.popInPlace(a));
+                try std.testing.expect(std.meta.eql(before, q));
+                try std.testing.expectEqual(refs, Q.refCount(q.front_stack.?, .monotonic));
+                for (copies[0..count]) |copy| {
+                    try std.testing.expectEqual(@as(u32, @intCast(size)), copy.len());
+                    try std.testing.expectEqual(@as(?i32, 0), copy.front());
+                }
+            }
+            // Вблизи предела запасной путь также умеет успешно закончиться.
+            var q = try Q.init().push(a, 10);
+            defer q.deinit(a);
+            var copies: [6]Q = undefined;
+            for (&copies) |*copy| copy.* = try q.clone();
+            defer for (&copies) |*copy| copy.deinit(a);
+            try std.testing.expect(q.nearLimit());
+            try q.pushInPlace(a, 20);
+            try std.testing.expectEqual(@as(?i32, 10), try q.popInPlace(a));
+            try std.testing.expectEqual(@as(?i32, 20), q.front());
+        }
+
+        // быстрый pop не клонирует версию и не выделяет узлы без ротации
+        fn allocationFreePop() !void {
+            const a = std.testing.allocator;
+            var q = QueueWithOptions(i32, .{ .atomic = atomic, .refs_limit = limit }).init();
+            defer q.deinit(a);
+            try q.pushInPlace(a, 1);
+            var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+            try std.testing.expectEqual(@as(?i32, 1), try q.popInPlace(failing.allocator()));
+            try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+            try std.testing.expect(q.isEmpty());
+        }
+
+        fn nearLimitAllocationFailures(allocator: Allocator) !void {
+            const Q = QueueWithOptions(i32, .{ .atomic = atomic, .refs_limit = 8 });
+            var q = try Q.init().push(allocator, 10);
+            defer q.deinit(allocator);
+            var copies: [6]Q = undefined;
+            for (&copies) |*copy| copy.* = try q.clone();
+            defer for (&copies) |*copy| copy.deinit(allocator);
+            const before = q;
+            const refs = Q.refCount(q.front_stack.?, .monotonic);
+            q.pushInPlace(allocator, 20) catch |err| {
+                try std.testing.expect(std.meta.eql(before, q));
+                try std.testing.expectEqual(refs, Q.refCount(q.front_stack.?, .monotonic));
+                for (copies) |copy| try std.testing.expectEqual(@as(?i32, 10), copy.front());
+                return err;
             };
-            copies[count] = copy;
-            count += 1;
+            const before_pop = q;
+            const refs_before_pop = Q.refCount(q.front_stack.?, .monotonic);
+            _ = q.popInPlace(allocator) catch |err| {
+                try std.testing.expect(std.meta.eql(before_pop, q));
+                try std.testing.expectEqual(refs_before_pop, Q.refCount(q.front_stack.?, .monotonic));
+                for (copies) |copy| try std.testing.expectEqual(@as(?i32, 10), copy.front());
+                return err;
+            };
+            try std.testing.expectEqual(@as(?i32, 20), q.front());
         }
-        const before = q;
-        const refs = q.front_stack.?.refs;
-        try std.testing.expectError(error.Overflow, q.pushInPlace(a, 99));
-        try std.testing.expectError(error.Overflow, q.popInPlace(a));
-        try std.testing.expect(std.meta.eql(before, q));
-        try std.testing.expectEqual(refs, q.front_stack.?.refs);
-        for (copies[0..count]) |copy| {
-            try std.testing.expectEqual(@as(u32, @intCast(size)), copy.len());
-            try std.testing.expectEqual(@as(?i32, 0), copy.front());
+
+        // отказ каждой аллокации запасного пути вблизи предела ссылок
+        fn nearLimitFailures() !void {
+            try std.testing.checkAllAllocationFailures(std.testing.allocator, nearLimitAllocationFailures, .{});
         }
-    }
-    // Вблизи предела запасной путь также умеет успешно закончиться.
-    var q = try Q.init().push(a, 10);
-    defer q.deinit(a);
-    var copies: [6]Q = undefined;
-    for (&copies) |*copy| copy.* = try q.clone();
-    defer for (&copies) |*copy| copy.deinit(a);
-    try std.testing.expect(q.nearLimit());
-    try q.pushInPlace(a, 20);
-    try std.testing.expectEqual(@as(?i32, 10), try q.popInPlace(a));
-    try std.testing.expectEqual(@as(?i32, 20), q.front());
-}
 
-test "быстрый pop не клонирует версию и не выделяет узлы без ротации" {
-    const a = std.testing.allocator;
-    var q = Queue(i32).init();
-    defer q.deinit(a);
-    try q.pushInPlace(a, 1);
-    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
-    try std.testing.expectEqual(@as(?i32, 1), try q.popInPlace(failing.allocator()));
-    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
-    try std.testing.expect(q.isEmpty());
-}
-
-fn nearLimitAllocationFailures(allocator: Allocator) !void {
-    const Q = QueueWithOptions(i32, .{ .refs_limit = 8 });
-    var q = try Q.init().push(allocator, 10);
-    defer q.deinit(allocator);
-    var copies: [6]Q = undefined;
-    for (&copies) |*copy| copy.* = try q.clone();
-    defer for (&copies) |*copy| copy.deinit(allocator);
-    const before = q;
-    const refs = q.front_stack.?.refs;
-    q.pushInPlace(allocator, 20) catch |err| {
-        try std.testing.expect(std.meta.eql(before, q));
-        try std.testing.expectEqual(refs, q.front_stack.?.refs);
-        for (copies) |copy| try std.testing.expectEqual(@as(?i32, 10), copy.front());
-        return err;
+        // переполнение хвоста при advance: запасной pop откатывает клонирование
+        fn advanceOverflowRollback() !void {
+            const Q = QueueWithOptions(i32, .{ .atomic = atomic, .refs_limit = 8 });
+            const a = std.testing.allocator;
+            var q = Q.init();
+            defer q.deinit(a);
+            try Q.prepend(a, &q.front_stack, 2, null);
+            const tail = q.front_stack;
+            try Q.prepend(a, &q.front_stack, 1, null);
+            q.size = 2;
+            q.front_len = 2;
+            var tails: [7]Q = undefined;
+            for (&tails) |*version| {
+                try Q.retain(tail);
+                version.* = .{ .front_stack = tail, .size = 1, .front_len = 1 };
+            }
+            defer for (&tails) |*version| version.deinit(a);
+            const before = q;
+            try std.testing.expectEqual(@as(u32, 1), Q.refCount(q.front_stack.?, .monotonic));
+            try std.testing.expectError(error.Overflow, q.popInPlace(a));
+            try std.testing.expect(std.meta.eql(before, q));
+            try std.testing.expectEqual(@as(u32, 1), Q.refCount(q.front_stack.?, .monotonic));
+            try std.testing.expectEqual(@as(u32, 8), Q.refCount(tail.?, .monotonic));
+        }
     };
-    const before_pop = q;
-    const refs_before_pop = q.front_stack.?.refs;
-    _ = q.popInPlace(allocator) catch |err| {
-        try std.testing.expect(std.meta.eql(before_pop, q));
-        try std.testing.expectEqual(refs_before_pop, q.front_stack.?.refs);
-        for (copies) |copy| try std.testing.expectEqual(@as(?i32, 10), copy.front());
-        return err;
-    };
-    try std.testing.expectEqual(@as(?i32, 20), q.front());
 }
-
-test "отказ каждой аллокации запасного пути вблизи предела ссылок" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, nearLimitAllocationFailures, .{});
-}
-
-test "переполнение хвоста при advance: запасной pop откатывает клонирование" {
-    const Q = QueueWithOptions(i32, .{ .refs_limit = 8 });
-    const a = std.testing.allocator;
-    var q = Q.init();
-    defer q.deinit(a);
-    try Q.prepend(a, &q.front_stack, 2, null);
-    const tail = q.front_stack;
-    try Q.prepend(a, &q.front_stack, 1, null);
-    q.size = 2;
-    q.front_len = 2;
-    var tails: [7]Q = undefined;
-    for (&tails) |*version| {
-        try Q.retain(tail);
-        version.* = .{ .front_stack = tail, .size = 1, .front_len = 1 };
+test "обе реализации" {
+    inline for (.{ false, true }) |atomic| {
+        try InternalSuite(atomic).nodeLayoutAndOverflow();
+        try InternalSuite(atomic).smallRefsLimit();
+        try InternalSuite(atomic).allocationFreePop();
+        try InternalSuite(atomic).nearLimitFailures();
+        try InternalSuite(atomic).advanceOverflowRollback();
     }
-    defer for (&tails) |*version| version.deinit(a);
-    const before = q;
-    try std.testing.expectEqual(@as(u32, 1), q.front_stack.?.refs);
-    try std.testing.expectError(error.Overflow, q.popInPlace(a));
-    try std.testing.expect(std.meta.eql(before, q));
-    try std.testing.expectEqual(@as(u32, 1), q.front_stack.?.refs);
-    try std.testing.expectEqual(@as(u32, 8), tail.?.refs);
+}
+
+test "атомарный мягкий предел: неотказывающий инкремент и откат выше предела" {
+    const Q = QueueWithOptions(i32, .{ .atomic = true, .refs_limit = 8 });
+    const a = std.testing.allocator;
+    var q = try Q.init().push(a, 1);
+    defer q.deinit(a);
+    const node = q.front_stack.?;
+    // Моделируем конкурирующее приобретение после nearLimit предпроверки.
+    Q.setRefs(node, 8);
+    defer Q.setRefs(node, 1);
+    try Q.retainMode(node, true);
+    try std.testing.expectEqual(@as(u32, 9), Q.refCount(node, .monotonic));
+    try std.testing.expectError(error.Overflow, q.clone());
+    try std.testing.expectError(error.Overflow, q.push(a, 2));
+    try std.testing.expectError(error.Overflow, q.pop(a));
+    try std.testing.expectEqual(@as(u32, 9), Q.refCount(node, .monotonic));
+    _ = Q.dropRef(node);
 }

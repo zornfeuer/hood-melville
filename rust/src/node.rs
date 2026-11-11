@@ -7,41 +7,58 @@
 //! значением, и занимает выравнивающий промежуток: для `i32` узел — 16 байт,
 //! как в C. Слабых ссылок нет, поэтому освобождение — один декремент.
 //!
+//! Счётчик — по политике `R` (`crate::refcount`): `Cell<u32>` или
+//! `AtomicU32`; в обоих случаях 4 байта, узел для `i32` — 16.
+//!
 //! Единственный модуль крейта с `unsafe`. Инварианты:
 //! - `NodePtr` всегда указывает на живой `NodeBox`, отданный `Box::leak`;
 //! - `refs` равен числу живых `NodePtr` на этот узел (≥ 1, пока узел жив);
 //! - узел освобождается (`Box::from_raw`) ровно один раз — тем, кто уменьшил
-//!   `refs` с 1 до 0 или забрал узел как единственный владелец.
+//!   `refs` с 1 до 0 или забрал узел как единственный владелец;
+//! - `value` и `next` после создания узла только читаются; с атомарным
+//!   счётчиком их читают из нескольких потоков (отсюда `T: Sync`), а
+//!   освобождение синхронизировано с этими чтениями порядками памяти счётчика.
 //!
 //! Тесты всего крейта прогоняются под Miri (`just rust-miri`).
 
 #![allow(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-use std::cell::Cell;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
-struct NodeBox<T> {
-    refs: Cell<u32>,
+use crate::refcount::{Atomic, RefCount};
+
+struct NodeBox<T, R: RefCount> {
+    refs: R::Counter,
     value: T,
-    next: Option<NodePtr<T>>,
+    next: Option<NodePtr<T, R>>,
 }
 
 /// Владеющая ссылка на узел: клонирование — retain, удаление — release.
-pub(crate) struct NodePtr<T> {
-    ptr: NonNull<NodeBox<T>>,
-    /// Для drop check: `NodePtr` владеет `NodeBox<T>`, а значит и `T`.
-    _owns: PhantomData<NodeBox<T>>,
+pub(crate) struct NodePtr<T, R: RefCount> {
+    ptr: NonNull<NodeBox<T, R>>,
+    /// Для drop check: `NodePtr` владеет `NodeBox`, а значит и `T`.
+    _owns: PhantomData<NodeBox<T, R>>,
 }
 
-impl<T> NodePtr<T> {
+// SAFETY: как у `Arc<T>`: ссылку можно передать другому потоку и разделять
+// между потоками, если `T` можно и передавать (последний владелец забирает
+// или удаляет значение в своём потоке), и читать из нескольких потоков.
+// Счётчик атомарный, а освобождение синхронизировано с чтениями
+// (`Release`/`Acquire`, см. `refcount`). С `Local` (`Cell`) — ни то ни другое:
+// `NonNull` не `Send`/`Sync`, а `Rotation`/`Queue` наследуют это.
+unsafe impl<T: Send + Sync> Send for NodePtr<T, Atomic> {}
+// SAFETY: см. выше.
+unsafe impl<T: Send + Sync> Sync for NodePtr<T, Atomic> {}
+
+impl<T, R: RefCount> NodePtr<T, R> {
     /// Новый узел со счётчиком 1 — аналог `cons`.
     #[inline]
     pub(crate) fn new(value: T, next: Option<Self>) -> Self {
         let node = Box::new(NodeBox {
-            refs: Cell::new(1),
+            refs: R::one(),
             value,
             next,
         });
@@ -52,9 +69,10 @@ impl<T> NodePtr<T> {
     }
 
     #[inline]
-    fn inner(&self) -> &NodeBox<T> {
+    fn inner(&self) -> &NodeBox<T, R> {
         // SAFETY: пока жив `self`, он держит одну из `refs` ссылок, и узел не
-        // освобождён; изменяемых ссылок на `NodeBox` не бывает (счётчик — `Cell`).
+        // освобождён; изменяемых ссылок на `NodeBox` не бывает (счётчик меняется
+        // через `Cell`/атомарные операции).
         unsafe { self.ptr.as_ref() }
     }
 
@@ -72,7 +90,7 @@ impl<T> NodePtr<T> {
     /// владелец; иначе вернуть ссылку обратно.
     #[inline]
     pub(crate) fn into_parts(self) -> Result<(T, Option<Self>), Self> {
-        if self.inner().refs.get() != 1 {
+        if !R::is_unique(&self.inner().refs) {
             return Err(self);
         }
         let this = ManuallyDrop::new(self);
@@ -98,7 +116,7 @@ impl<T> NodePtr<T> {
         T: Clone,
     {
         let next = self.inner().next.as_ref()?;
-        if self.inner().refs.get() != 1 {
+        if !R::is_unique(&self.inner().refs) {
             // Паника `clone` оставляет `self` нетронутым.
             let value = self.value().clone();
             *self = next.clone();
@@ -129,7 +147,7 @@ impl<T> NodePtr<T> {
     /// `docs/benchmarks.md`).
     #[inline]
     pub(crate) fn touch(&self) {
-        std::hint::black_box(self.inner().refs.get());
+        R::touch(&self.inner().refs);
     }
 
     #[cfg(test)]
@@ -138,15 +156,10 @@ impl<T> NodePtr<T> {
     }
 }
 
-impl<T> Clone for NodePtr<T> {
+impl<T, R: RefCount> Clone for NodePtr<T, R> {
     #[inline]
     fn clone(&self) -> Self {
-        let refs = &self.inner().refs;
-        // Переполнение означает 2^32 живых ссылок; как и `Rc`, не продолжаем.
-        let Some(n) = refs.get().checked_add(1) else {
-            std::process::abort();
-        };
-        refs.set(n);
+        R::increment(&self.inner().refs);
         Self {
             ptr: self.ptr,
             _owns: PhantomData,
@@ -159,7 +172,7 @@ impl<T> Clone for NodePtr<T> {
 /// Рекурсивный drop (`NodeBox` → `next` → `NodeBox` → ...) переполнил бы стек
 /// вызовов на длинных списках, поэтому хвост умершего узла освобождается в
 /// том же цикле, пока узлы умирают; на первом живом цикл останавливается.
-impl<T> Drop for NodePtr<T> {
+impl<T, R: RefCount> Drop for NodePtr<T, R> {
     #[inline]
     fn drop(&mut self) {
         let mut ptr = self.ptr;
@@ -167,13 +180,13 @@ impl<T> Drop for NodePtr<T> {
             // SAFETY: мы держим одну ссылку на узел `ptr` (сначала — `self`,
             // далее — `next`, забранный из освобождённого узла), он жив.
             let refs = unsafe { &ptr.as_ref().refs };
-            let n = refs.get() - 1;
-            if n != 0 {
-                refs.set(n);
+            if !R::decrement(refs) {
                 return;
             }
             // SAFETY: мы были последним владельцем (`refs` дошёл до 0), ссылок
-            // на узел больше нет, `refs` выше больше не используется.
+            // на узел больше нет, `refs` выше больше не используется; с
+            // атомарным счётчиком `decrement` синхронизировал нас со всеми
+            // обращениями прежних владельцев.
             let node = unsafe { Box::from_raw(ptr.as_ptr()) };
             let NodeBox { value, next, .. } = *node;
             drop(value);
@@ -187,12 +200,22 @@ impl<T> Drop for NodePtr<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::refcount::Local;
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::thread;
+
+    type NodePtr<T> = super::NodePtr<T, Local>;
+
+    fn refs<T, R: RefCount>(p: &super::NodePtr<T, R>) -> u32 {
+        R::get(&p.inner().refs)
+    }
 
     #[test]
     fn node_layout_matches_c() {
         // C: `struct node { int value; int refcount; struct node *next; }`.
-        assert_eq!(size_of::<NodeBox<i32>>(), 16);
+        assert_eq!(size_of::<NodeBox<i32, Local>>(), 16);
+        assert_eq!(size_of::<NodeBox<i32, Atomic>>(), 16);
         assert_eq!(size_of::<Option<NodePtr<i32>>>(), 8);
     }
 
@@ -200,10 +223,10 @@ mod tests {
     fn clone_and_drop_track_refs() {
         let a = NodePtr::new(1, None);
         let b = a.clone();
-        assert_eq!(a.inner().refs.get(), 2);
+        assert_eq!(refs(&a), 2);
         assert!(NodePtr::ptr_eq(&a, &b));
         drop(b);
-        assert_eq!(a.inner().refs.get(), 1);
+        assert_eq!(refs(&a), 1);
     }
 
     #[test]
@@ -233,9 +256,40 @@ mod tests {
 
         drop(head);
         assert_eq!(Rc::strong_count(&tracker), 2);
-        assert_eq!(shared.inner().refs.get(), 1);
+        assert_eq!(refs(&shared), 1);
 
         drop(shared);
         assert_eq!(Rc::strong_count(&tracker), 1);
+    }
+
+    /// Ссылки на общий хвост берут и отпускают несколько потоков; каждый
+    /// строит свою цепочку поверх него и разбирает её. Под Miri проверяет и
+    /// отсутствие гонок данных.
+    #[test]
+    fn atomic_refs_across_threads() {
+        type P = super::NodePtr<Arc<u32>, Atomic>;
+        let tracker = Arc::new(7);
+        let shared: P = super::NodePtr::new(Arc::clone(&tracker), None);
+        let (threads, rounds) = if cfg!(miri) { (3, 20) } else { (8, 2000) };
+        thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(|| {
+                    for _ in 0..rounds {
+                        let mut head = Some(shared.clone());
+                        for _ in 0..3 {
+                            head = Some(super::NodePtr::new(Arc::clone(&tracker), head));
+                        }
+                        let mut node = head.unwrap();
+                        while let Some(value) = node.advance_unless_last() {
+                            assert_eq!(*value, 7);
+                        }
+                        assert!(super::NodePtr::ptr_eq(&node, &shared));
+                    }
+                });
+            }
+        });
+        assert_eq!(refs(&shared), 1);
+        drop(shared);
+        assert_eq!(Arc::strong_count(&tracker), 1);
     }
 }

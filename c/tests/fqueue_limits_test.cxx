@@ -2,6 +2,7 @@
 // (TEST_LEN_LIMIT, TEST_REFS_LIMIT; see CMakeLists.txt). Every failure must
 // leave `q` unchanged and leak nothing.
 
+#include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "fqueue.h"
+#include "fqueue_api.hpp"
 #include "fqueue_test_util.hpp"
 
 // Test allocator: counts live blocks and can fail one chosen allocation.
@@ -45,8 +47,8 @@ static void disarm() { fail_in = -1; }
 // k = 0, 1, ... until it succeeds. Every injected failure must yield
 // FQUEUE_NOMEM, leave q's contents as `expected` and leak nothing. Returns the
 // number of failures; *out holds the successful result.
-template <class Op>
-static long op_under_oom(Op op, fqueue *out, const fqueue *q,
+template <class Op, class Q>
+static long op_under_oom(Op op, Q *out, const Q *q,
                          const std::vector<int> &expected) {
   for (long k = 0;; ++k) {
     long before = live;
@@ -59,18 +61,18 @@ static long op_under_oom(Op op, fqueue *out, const fqueue *q,
     }
     REQUIRE(s == FQUEUE_NOMEM);
     REQUIRE(live == before);
-    REQUIRE(contents(q) == expected);
+    REQUIRE(contents_of(q) == expected);
   }
 }
 
-static fqueue_status do_pop(fqueue *out, const fqueue *q) {
-  return fqueue_pop(out, q);
+template <class Q> static fqueue_status do_pop(Q *out, const Q *q) {
+  return Api<Q>::pop(out, q);
 }
 
 // The same for an in-place operation on *q: every injected failure must leave
 // *q as `expected`. Returns the number of failures; *q is then changed.
-template <class Op>
-static long in_place_under_oom(Op op, fqueue *q,
+template <class Op, class Q>
+static long in_place_under_oom(Op op, Q *q,
                                const std::vector<int> &expected) {
   for (long k = 0;; ++k) {
     long before = live;
@@ -83,72 +85,75 @@ static long in_place_under_oom(Op op, fqueue *q,
     }
     REQUIRE(s == FQUEUE_NOMEM);
     REQUIRE(live == before);
-    REQUIRE(contents(q) == expected);
+    REQUIRE(contents_of(q) == expected);
   }
 }
 
-static fqueue_status do_pop_in_place(fqueue *q) {
+template <class Q> static fqueue_status do_pop_in_place(Q *q) {
   int v = -1;
-  fqueue_status s = fqueue_pop_in_place(q, &v);
+  fqueue_status s = Api<Q>::pop_in_place(q, &v);
   if (s != FQUEUE_OK) REQUIRE(v == -1);
   return s;
 }
 
 // In-place push and pop under OOM on a clone of q, which shares its nodes.
-static long in_place_oom_on_clone(const fqueue *q, std::deque<int> model,
+template <class Q>
+static long in_place_oom_on_clone(const Q *q, std::deque<int> model,
                                   int value) {
   std::vector<int> expected(model.begin(), model.end());
-  fqueue c;
-  REQUIRE(fqueue_clone(&c, q) == FQUEUE_OK);
+  Q c;
+  REQUIRE(Api<Q>::clone(&c, q) == FQUEUE_OK);
   long failures = in_place_under_oom(
-      [&](fqueue *p) { return fqueue_push_in_place(p, value); }, &c, expected);
+      [&](Q *p) { return Api<Q>::push_in_place(p, value); }, &c, expected);
   expected.push_back(value);
-  REQUIRE(contents(&c) == expected);
-  failures += in_place_under_oom(do_pop_in_place, &c, expected);
+  REQUIRE(contents_of(&c) == expected);
+  failures += in_place_under_oom(do_pop_in_place<Q>, &c, expected);
   expected.erase(expected.begin());
-  REQUIRE(contents(&c) == expected);
-  fqueue_destroy(&c);
-  REQUIRE(contents(q) == std::vector<int>(model.begin(), model.end()));
+  REQUIRE(contents_of(&c) == expected);
+  Api<Q>::destroy(&c);
+  REQUIRE(contents_of(q) == std::vector<int>(model.begin(), model.end()));
   return failures;
 }
 
 // Every push/pop history up to `depth` operations, with every allocation of
 // every operation failed once before it is allowed to succeed.
-static void explore_oom(const fqueue *q, std::deque<int> &model, int depth,
+template <class Q>
+static void explore_oom(const Q *q, std::deque<int> &model, int depth,
                         long &failures) {
   std::vector<int> expected(model.begin(), model.end());
-  REQUIRE(contents(q) == expected);
+  REQUIRE(contents_of(q) == expected);
   if (model.size() < TEST_LEN_LIMIT)
     failures += in_place_oom_on_clone(q, model, -depth);
   if (depth == 0) return;
 
-  fqueue child;
+  Q child;
   failures += op_under_oom(
-      [&](fqueue *out, const fqueue *p) { return fqueue_push(out, p, depth); },
+      [&](Q *out, const Q *p) { return Api<Q>::push(out, p, depth); },
       &child, q, expected);
   model.push_back(depth);
   explore_oom(&child, model, depth - 1, failures);
   model.pop_back();
-  fqueue_destroy(&child);
+  Api<Q>::destroy(&child);
 
   if (!model.empty()) {
-    failures += op_under_oom(do_pop, &child, q, expected);
+    failures += op_under_oom(do_pop<Q>, &child, q, expected);
     int x = model.front();
     model.pop_front();
     explore_oom(&child, model, depth - 1, failures);
     model.push_front(x);
-    fqueue_destroy(&child);
+    Api<Q>::destroy(&child);
   }
 }
 
-TEST_CASE("out of memory in any allocation of short histories", "[limits]") {
+TEMPLATE_TEST_CASE("out of memory in any allocation of short histories",
+                   "[limits]", fqueue, fqueue_sync) {
   long start = live;
-  fqueue q;
-  fqueue_init(&q);
+  TestType q;
+  Api<TestType>::init(&q);
   std::deque<int> model;
   long failures = 0;
   explore_oom(&q, model, 10, failures);
-  fqueue_destroy(&q);
+  Api<TestType>::destroy(&q);
   REQUIRE(failures > 500);
   REQUIRE(live == start);
 }
@@ -175,7 +180,7 @@ TEST_CASE("out of memory in any allocation along a long history", "[limits]") {
     auto pop = [&] {
       std::vector<int> expected(model.begin(), model.end());
       fqueue out;
-      failures += op_under_oom(do_pop, &out, versions.back().get(), expected);
+      failures += op_under_oom(do_pop<fqueue>, &out, versions.back().get(), expected);
       fqueue_destroy(&out);
       versions.push_back(*versions.back().pop());
       model.pop_front();
@@ -212,7 +217,7 @@ TEST_CASE("out of memory in any allocation of in-place operations on a version "
     };
     auto pop = [&] {
       std::vector<int> expected(model.begin(), model.end());
-      failures += in_place_under_oom(do_pop_in_place, &q, expected);
+      failures += in_place_under_oom(do_pop_in_place<fqueue>, &q, expected);
       model.pop_front();
     };
     while (model.size() + 2 <= TEST_LEN_LIMIT) {
@@ -438,6 +443,56 @@ TEST_CASE("an iterator step that runs out of memory can be retried",
     fqueue_iter_destroy(&it);
     REQUIRE(got == expected);
     REQUIRE(failures > 0);
+  }
+  REQUIRE(live == start);
+}
+
+TEMPLATE_TEST_CASE("too many references report FQUEUE_OVERFLOW in both "
+                   "instantiations",
+                   "[limits]", fqueue, fqueue_sync) {
+  using A = Api<TestType>;
+  long start = live;
+  {
+    // A version in the middle of a rotation, so that its rotation's nodes are
+    // shared too.
+    TestType q;
+    A::init(&q);
+    for (int i = 0; i < 9; ++i)
+      REQUIRE(A::push_in_place(&q, i) == FQUEUE_OK);
+    REQUIRE(A::pop_in_place(&q, nullptr) == FQUEUE_OK);
+    std::vector<int> expected = contents_of(&q);
+
+    std::vector<TestType> clones;
+    fqueue_status s;
+    for (;;) {
+      TestType c;
+      s = A::clone(&c, &q);
+      if (s != FQUEUE_OK) break;
+      clones.push_back(c);
+      REQUIRE(clones.size() <= TEST_REFS_LIMIT);
+    }
+    REQUIRE(s == FQUEUE_OVERFLOW);
+    long saturated = live;
+
+    TestType out;
+    int v = -1;
+    REQUIRE(A::push(&out, &q, -1) == FQUEUE_OVERFLOW);
+    REQUIRE(A::pop(&out, &q) == FQUEUE_OVERFLOW);
+    REQUIRE(A::push_in_place(&clones.back(), -1) == FQUEUE_OVERFLOW);
+    REQUIRE(A::pop_in_place(&clones.back(), &v) == FQUEUE_OVERFLOW);
+    REQUIRE(v == -1);
+    REQUIRE(A::size(&clones.back()) == expected.size());
+    REQUIRE(live == saturated);
+
+    for (int i = 0; i < 8; ++i) {
+      A::destroy(&clones.back());
+      clones.pop_back();
+    }
+    REQUIRE(contents_of(&q) == expected);
+    REQUIRE(contents_of(&clones.front()) == expected);
+    for (TestType &c : clones)
+      A::destroy(&c);
+    A::destroy(&q);
   }
   REQUIRE(live == start);
 }

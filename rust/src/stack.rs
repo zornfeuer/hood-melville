@@ -4,11 +4,12 @@
 //! удаление — release с итеративным освобождением цепочки.
 
 use crate::node::NodePtr;
+use crate::refcount::RefCount;
 
 /// Неизменяемый стек. Разные версии разделяют общие хвосты.
-pub(crate) struct Stack<T>(Option<NodePtr<T>>);
+pub(crate) struct Stack<T, R: RefCount>(Option<NodePtr<T, R>>);
 
-impl<T> Stack<T> {
+impl<T, R: RefCount> Stack<T, R> {
     /// Пустой стек.
     pub(crate) const fn new() -> Self {
         Self(None)
@@ -87,7 +88,7 @@ impl<T> Stack<T> {
 
     /// Итератор по элементам от вершины ко дну.
     #[cfg(test)]
-    pub(crate) fn iter(&self) -> Iter<'_, T> {
+    pub(crate) fn iter(&self) -> Iter<'_, T, R> {
         Iter(self.0.as_ref())
     }
 }
@@ -95,11 +96,11 @@ impl<T> Stack<T> {
 /// Непустой стек: вершина есть всегда. Указатель на неё ненулевой, и
 /// `Rotation` кодирует свой второй вариант нулём на его месте (niche) — без
 /// отдельного тега.
-pub(crate) struct NonEmptyStack<T>(NodePtr<T>);
+pub(crate) struct NonEmptyStack<T, R: RefCount>(NodePtr<T, R>);
 
-impl<T> NonEmptyStack<T> {
+impl<T, R: RefCount> NonEmptyStack<T, R> {
     #[inline]
-    pub(crate) fn new(stack: Stack<T>) -> Option<Self> {
+    pub(crate) fn new(stack: Stack<T, R>) -> Option<Self> {
         stack.0.map(Self)
     }
 
@@ -127,12 +128,12 @@ impl<T> NonEmptyStack<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn iter(&self) -> Iter<'_, T> {
+    pub(crate) fn iter(&self) -> Iter<'_, T, R> {
         Iter(Some(&self.0))
     }
 }
 
-impl<T> Clone for NonEmptyStack<T> {
+impl<T, R: RefCount> Clone for NonEmptyStack<T, R> {
     #[inline]
     fn clone(&self) -> Self {
         Self(self.0.clone())
@@ -141,24 +142,24 @@ impl<T> Clone for NonEmptyStack<T> {
 
 // Ручные реализации вместо derive: derive потребовал бы `T: Clone` / `T: Default`,
 // хотя клонируется только указатель на узел.
-impl<T> Clone for Stack<T> {
+impl<T, R: RefCount> Clone for Stack<T, R> {
     #[inline]
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<T> Default for Stack<T> {
+impl<T, R: RefCount> Default for Stack<T, R> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[cfg(test)]
-pub(crate) struct Iter<'a, T>(Option<&'a NodePtr<T>>);
+pub(crate) struct Iter<'a, T, R: RefCount>(Option<&'a NodePtr<T, R>>);
 
 #[cfg(test)]
-impl<'a, T> Iterator for Iter<'a, T> {
+impl<'a, T, R: RefCount> Iterator for Iter<'a, T, R> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -171,6 +172,9 @@ impl<'a, T> Iterator for Iter<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::refcount::Local;
+
+    type Stack<T> = super::Stack<T, Local>;
     use std::cell::Cell;
 
     fn from_slice<T: Clone>(items: &[T]) -> Stack<T> {

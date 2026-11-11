@@ -44,11 +44,21 @@
 //
 // Implementation options (define before the FQUEUE_IMPLEMENTATION include):
 // FQUEUE_MALLOC and FQUEUE_FREE together replace malloc and free; they must
-// have the same signatures.
+// have the same signatures. FQUEUE_ATOMIC makes this instantiation thread-safe
+// (see Threads); it affects only the definitions, not the declarations.
 //
-// Threads. Versions that share nodes must not be used concurrently, even for
-// reading: reference counts are not atomic. Versions with no common history
-// are independent; the library has no global state.
+// Threads. Without FQUEUE_ATOMIC, versions that share nodes must not be used
+// concurrently, even for reading: reference counts are not atomic. Versions
+// with no common history are independent; the library has no global state.
+// With FQUEUE_ATOMIC (C11 atomics, memory orders as Arc in Rust), any number
+// of threads may concurrently read a version and derive new versions from it
+// (NAME_clone, NAME_push, NAME_pop with it as `q`, NAME_front, ...), even if
+// versions share nodes. A version object itself is like any C object: writing
+// it (as `out`, with NAME_destroy, NAME_push_in_place, NAME_pop_in_place, the
+// iterator) must not race with other accesses to that same object. The
+// reference limit is then soft: concurrent operations may take a count
+// slightly above it, and the limit is UINT32_MAX / 2, so counts never wrap.
+// fqueue.h provides both: fqueue (single-threaded) and fqueue_sync.
 //
 // Complexity: everything except NAME_destroy is worst-case O(1) (at most 3 new
 // nodes per push and 2 per pop). NAME_destroy is not: it frees every node the
@@ -209,6 +219,9 @@ FQUEUE_API void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter)* it);
 
 #include <assert.h>
 #include <stdlib.h>
+#ifdef FQUEUE_ATOMIC
+#include <stdatomic.h>
+#endif
 
 // Allocator and limits, shared by all instantiations in this translation unit.
 #ifndef FQUEUE_IMPL_CONFIGURED
@@ -238,6 +251,11 @@ void  FQUEUE_FREE(void *ptr);
 #ifndef FQUEUE_IMPL_REFS_LIMIT
 #define FQUEUE_IMPL_REFS_LIMIT (UINT32_MAX - 16)
 #endif
+// The same for FQUEUE_ATOMIC instantiations: soft (see Threads), with a
+// headroom of 2^31 increments that no number of threads can overrun.
+#ifndef FQUEUE_IMPL_ATOMIC_REFS_LIMIT
+#define FQUEUE_IMPL_ATOMIC_REFS_LIMIT (UINT32_MAX / 2)
+#endif
 
 // The persistent and the in-place operations share the code of a rotation
 // step; forced inlining with a constant pool argument gives the persistent
@@ -257,18 +275,79 @@ void  FQUEUE_FREE(void *ptr);
 
 struct FQUEUE_IMPL_NODE {
   FQUEUE_T                 value;
+#ifdef FQUEUE_ATOMIC
+  _Atomic uint32_t         refcount;
+#else
   uint32_t                 refcount;
+#endif
   struct FQUEUE_IMPL_NODE *next;
 };
+
+// Reference count primitives. Atomic memory orders are those of Arc in Rust:
+// a new reference is made from an existing one, so the increment is relaxed;
+// a decrement is release, and the last owner issues an acquire fence before
+// freeing, so all accesses of the other owners (reads of value and next)
+// happen before the free; the uniqueness check is acquire for the same reason
+// (the caller then takes the node apart and frees it).
+#ifdef FQUEUE_ATOMIC
+#define FQUEUE_IMPL_LIMIT FQUEUE_IMPL_ATOMIC_REFS_LIMIT
+
+static inline void FQUEUE_IMPL_P(refs_init)(FQUEUE_IMPL_NODE *n) {
+  atomic_init(&n->refcount, 1);
+}
+static inline uint32_t FQUEUE_IMPL_P(refs)(FQUEUE_IMPL_NODE *n) {
+  return atomic_load_explicit(&n->refcount, memory_order_relaxed);
+}
+static inline bool FQUEUE_IMPL_P(refs_unique)(FQUEUE_IMPL_NODE *n) {
+  return atomic_load_explicit(&n->refcount, memory_order_acquire) == 1;
+}
+// New count.
+static inline uint32_t FQUEUE_IMPL_P(refs_inc)(FQUEUE_IMPL_NODE *n) {
+  return atomic_fetch_add_explicit(&n->refcount, 1, memory_order_relaxed) + 1;
+}
+// True if the reference was the last one.
+static inline bool FQUEUE_IMPL_P(refs_dec)(FQUEUE_IMPL_NODE *n) {
+  if (atomic_fetch_sub_explicit(&n->refcount, 1, memory_order_release) != 1)
+    return false;
+  atomic_thread_fence(memory_order_acquire);
+  return true;
+}
+// Load the count (and discard it) so that its cache line arrives early.
+static inline void FQUEUE_IMPL_P(touch)(FQUEUE_IMPL_NODE *n) {
+  (void)atomic_load_explicit(&n->refcount, memory_order_relaxed);
+}
+#else
+#define FQUEUE_IMPL_LIMIT FQUEUE_IMPL_REFS_LIMIT
+
+static inline void FQUEUE_IMPL_P(refs_init)(FQUEUE_IMPL_NODE *n) {
+  n->refcount = 1;
+}
+static inline uint32_t FQUEUE_IMPL_P(refs)(FQUEUE_IMPL_NODE *n) {
+  return n->refcount;
+}
+static inline bool FQUEUE_IMPL_P(refs_unique)(FQUEUE_IMPL_NODE *n) {
+  return n->refcount == 1;
+}
+static inline uint32_t FQUEUE_IMPL_P(refs_inc)(FQUEUE_IMPL_NODE *n) {
+  return ++n->refcount;
+}
+static inline bool FQUEUE_IMPL_P(refs_dec)(FQUEUE_IMPL_NODE *n) {
+  return --n->refcount == 0;
+}
+static inline void FQUEUE_IMPL_P(touch)(FQUEUE_IMPL_NODE *n) {
+  (void)*(volatile uint32_t *)&n->refcount;
+}
+#endif
 
 // Increment refcount; NULL-safe. Returns true iff the count is now above
 // REFS_LIMIT; callers accumulate that with `|=` and undo the operation (the
 // assert verifies the headroom in tests).
 static bool FQUEUE_IMPL_P(retain)(FQUEUE_IMPL_NODE *n) {
   if (!n) return false;
-  assert(n->refcount < FQUEUE_IMPL_REFS_LIMIT + 16);
-  n->refcount++;
-  return n->refcount > FQUEUE_IMPL_REFS_LIMIT;
+#ifndef FQUEUE_ATOMIC
+  assert(n->refcount < FQUEUE_IMPL_LIMIT + 16);
+#endif
+  return FQUEUE_IMPL_P(refs_inc)(n) > FQUEUE_IMPL_LIMIT;
 }
 
 // Decrement refcount iteratively; free chain when count reaches 0.
@@ -277,9 +356,9 @@ static bool FQUEUE_IMPL_P(retain)(FQUEUE_IMPL_NODE *n) {
 // Measured across 4 code layouts: -3..5% cycles, and no slow allocator mode in
 // mixed/fill 10^7; __builtin_prefetch in the same place gave no effect.
 static void FQUEUE_IMPL_P(release)(FQUEUE_IMPL_NODE *n) {
-  while (n && --n->refcount == 0) {
+  while (n && FQUEUE_IMPL_P(refs_dec)(n)) {
     FQUEUE_IMPL_NODE *next = n->next;
-    if (next) (void)*(volatile uint32_t *)&next->refcount;
+    if (next) FQUEUE_IMPL_P(touch)(next);
     FQUEUE_FREE(n);
     n = next;
   }
@@ -308,7 +387,7 @@ FQUEUE_IMPL_P(cons)(FQUEUE_T value, FQUEUE_IMPL_NODE *next,
     if (!n) return NULL;
   }
   n->value    = value;
-  n->refcount = 1;
+  FQUEUE_IMPL_P(refs_init)(n);
   n->next     = next;
   return n;
 }
@@ -372,13 +451,20 @@ static FQUEUE_IMPL_NODE *FQUEUE_IMPL_P(advance)(FQUEUE_IMPL_NODE *n,
                                                 bool *overflow) {
   if (!n) return NULL;
   FQUEUE_IMPL_NODE *next = n->next;
-  if (n->refcount == 1) {
-    if (next) (void)*(volatile uint32_t *)&next->refcount;
+  if (FQUEUE_IMPL_P(refs_unique)(n)) {
+    if (next) FQUEUE_IMPL_P(touch)(next);
     FQUEUE_FREE(n);
     return next;
   }
+#ifdef FQUEUE_ATOMIC
+  // The other owners may drop theirs meanwhile, making ours the last
+  // reference: take the successor first, then release n in full.
+  *overflow |= FQUEUE_IMPL_P(retain)(next);
+  FQUEUE_IMPL_P(release)(n);
+#else
   n->refcount--;
   *overflow |= FQUEUE_IMPL_P(retain)(next);
+#endif
   return next;
 }
 
@@ -599,7 +685,7 @@ static bool FQUEUE_IMPL_P(pool_fill)(FQUEUE_IMPL_P(pool) *p, unsigned n) {
 
 // True if a reference to n's successor could take a count above REFS_LIMIT.
 static bool FQUEUE_IMPL_P(next_near_limit)(const FQUEUE_IMPL_NODE *n) {
-  return n && n->next && n->next->refcount > FQUEUE_IMPL_REFS_LIMIT - 2;
+  return n && n->next && FQUEUE_IMPL_P(refs)(n->next) > FQUEUE_IMPL_LIMIT - 2;
 }
 
 // An in-place operation adds references only to the front node
@@ -612,7 +698,7 @@ static bool FQUEUE_IMPL_P(next_near_limit)(const FQUEUE_IMPL_NODE *n) {
 // not check which of the references the operation will actually take.
 static bool FQUEUE_IMPL_P(in_place_near_limit)(const FQUEUE_NAME *q) {
   const FQUEUE_IMPL_P(rotation) *r = &q->rot;
-  if ((q->front && q->front->refcount > FQUEUE_IMPL_REFS_LIMIT - 2) ||
+  if ((q->front && FQUEUE_IMPL_P(refs)(q->front) > FQUEUE_IMPL_LIMIT - 2) ||
       FQUEUE_IMPL_P(next_near_limit)(q->front) ||
       (q->front && FQUEUE_IMPL_P(next_near_limit)(q->front->next)) ||
       FQUEUE_IMPL_P(next_near_limit)(q->rear))
@@ -679,7 +765,10 @@ fqueue_status FQUEUE_IMPL_N(push_in_place)(FQUEUE_NAME *q, FQUEUE_T value) {
   q->size++;
   if (start) overflow |= FQUEUE_IMPL_P(start_rotation)(q);
   (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, &pool);
-  assert(!overflow && pool.n == 0);
+#ifndef FQUEUE_ATOMIC
+  assert(!overflow); // with FQUEUE_ATOMIC the limit is soft (see Threads)
+#endif
+  assert(pool.n == 0);
   (void)overflow;
   return FQUEUE_OK;
 }
@@ -724,7 +813,10 @@ fqueue_status FQUEUE_IMPL_N(pop_in_place)(FQUEUE_NAME *q, FQUEUE_T *value) {
     overflow |= FQUEUE_IMPL_P(start_rotation)(q);
   }
   (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, &pool);
-  assert(!overflow && pool.n == 0);
+#ifndef FQUEUE_ATOMIC
+  assert(!overflow); // with FQUEUE_ATOMIC the limit is soft (see Threads)
+#endif
+  assert(pool.n == 0);
   (void)overflow;
   return FQUEUE_OK;
 }
@@ -756,6 +848,8 @@ void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter) *it) {
 #undef FQUEUE_IMPL_N
 #undef FQUEUE_IMPL_P
 #undef FQUEUE_IMPL_NODE
+#undef FQUEUE_IMPL_LIMIT
+#undef FQUEUE_ATOMIC
 #undef FQUEUE_NAME
 #undef FQUEUE_T
 #undef FQUEUE_IMPLEMENTATION

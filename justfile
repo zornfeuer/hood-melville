@@ -10,6 +10,14 @@ c-test: c-build
     ./build/c/fqueue_test --skip-benchmarks
     ./build/c/fqueue_limits_test
 
+# Многопоточные C-тесты (fqueue_sync) под ThreadSanitizer.
+c-tsan:
+    cmake -S c -B build/c-tsan -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_C_FLAGS="-fsanitize=thread" -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" > /dev/null
+    cmake --build build/c-tsan --target fqueue_test
+    ./build/c-tsan/fqueue_test "[sync]"
+
 # C-тесты под AddressSanitizer и UBSan.
 c-asan:
     cmake -S c -B build/c-asan -DCMAKE_BUILD_TYPE=Debug \
@@ -48,7 +56,7 @@ rust-lint:
 # Тесты под Miri: проверка unsafe в rust/src/node.rs на UB и утечки
 # (Stacked Borrows для всех тестов, Tree Borrows — для юнит-тестов).
 rust-miri:
-    cd rust && cargo +nightly miri test --lib --test scenarios --test model --test branching
+    cd rust && cargo +nightly miri test --lib --test scenarios --test model --test branching --test sync
     cd rust && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test --lib
 
 # --- Zig 0.16 ----------------------------------------------------------------
@@ -70,8 +78,8 @@ test: c-test rust-test zig-test
 # build/c/fqueue_bench, rust/target/max/examples/fqueue_bench, zig/zig-out/bin/fqueue_bench.
 bench-build: zig-build
     cmake -S c -B build/c > /dev/null
-    cmake --build build/c --target fqueue_bench
-    cd rust && RUSTFLAGS="-C target-cpu=native" cargo build --profile max --example fqueue_bench
+    cmake --build build/c --target fqueue_bench fqueue_bench_sync
+    cd rust && RUSTFLAGS="-C target-cpu=native" cargo build --profile max --example fqueue_bench --example fqueue_bench_sync
 
 # Сценарии и размеры по умолчанию для сравнений.
 bench_cases := "--case fill:1000000 --case mixed:1000000 --case persistent:1000000 --case branching:1000000 --case fill:10000000 --case mixed:10000000"
@@ -108,6 +116,38 @@ bench-layouts label="cur":
         cp rust/target/layout-al$a/max/examples/fqueue_bench "$dir/Rust-al$a"
     done
     echo "раскладки: $dir"
+
+# Потокобезопасные варианты (fqueue_sync, SyncQueue, SyncQueue(T)) тех же
+# исходников: build/bench-layout/<label>/{C,Rust,Zig}-sync-al<N>.
+bench-layouts-sync label="cur":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=build/bench-layout/{{label}}
+    mkdir -p "$dir"
+    (cd zig && zig build --global-cache-dir .zig-cache-global -Doptimize=ReleaseFast -Dcpu=native)
+    for a in {{bench_layouts}}; do
+        cp zig/zig-out/bin/fqueue_bench_sync "$dir/Zig-sync-al$a"
+        cc -O3 -march=native -flto -DNDEBUG -DFQUEUE_BENCH_SYNC -Ic/include -falign-functions=$a -falign-loops=$a \
+            c/bench/fqueue_bench.c c/src/fqueue.c -o "$dir/C-sync-al$a"
+        log2=0; x=$a; while (( x > 1 )); do x=$(( x / 2 )); log2=$(( log2 + 1 )); done
+        (cd rust && RUSTFLAGS="-C target-cpu=native -C llvm-args=-align-all-functions=$log2 -C llvm-args=-align-loops=$a" \
+            cargo build -q --profile max --example fqueue_bench_sync --target-dir target/layout-al$a)
+        cp rust/target/layout-al$a/max/examples/fqueue_bench_sync "$dir/Rust-sync-al$a"
+    done
+    echo "раскладки: $dir"
+
+# Цена потокобезопасности в одном потоке: каждая реализация рядом со своим
+# вариантом на атомарных счётчиках, по 4 раскладкам (Zig — по одной).
+bench-compare-sync rounds="8": (bench-layouts "cur") (bench-layouts-sync "cur")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bins=()
+    for impl in C C-sync Rust Rust-sync; do
+        for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
+    done
+    bins+=("Zig/al64=build/bench-layout/cur/Zig-al64" "Zig-sync/al64=build/bench-layout/cur/Zig-sync-al64")
+    python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-sync \
+        {{bench_cases}} "${bins[@]}"
 
 # Сравнение C, Rust и Zig по всем вариантам раскладки — основной режим для выводов.
 bench-compare-layouts rounds="8": (bench-layouts "cur")

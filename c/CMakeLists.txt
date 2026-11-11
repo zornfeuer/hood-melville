@@ -70,7 +70,9 @@ if(HOOD_MELVILLE_BUILD_TESTS)
     enable_testing()
 
     add_executable(fqueue_test tests/fqueue_test.cxx tests/fqueue_generic_test.cxx
-        tests/fqueue_generic.c)
+        tests/fqueue_generic.c tests/fqueue_sync_test.cxx)
+    find_package(Threads REQUIRED)
+    target_link_libraries(fqueue_test PRIVATE Threads::Threads)
     target_link_libraries(fqueue_test PRIVATE fqueue Catch2::Catch2WithMain)
     add_test(NAME fqueue_test COMMAND fqueue_test --skip-benchmarks)
 
@@ -83,7 +85,8 @@ if(HOOD_MELVILLE_BUILD_TESTS)
     target_compile_definitions(fqueue_limits PRIVATE
         FQUEUE_MALLOC=fqueue_test_malloc FQUEUE_FREE=fqueue_test_free
         FQUEUE_IMPL_LEN_LIMIT=${FQUEUE_TEST_LEN_LIMIT}
-        FQUEUE_IMPL_REFS_LIMIT=${FQUEUE_TEST_REFS_LIMIT})
+        FQUEUE_IMPL_REFS_LIMIT=${FQUEUE_TEST_REFS_LIMIT}
+        FQUEUE_IMPL_ATOMIC_REFS_LIMIT=${FQUEUE_TEST_REFS_LIMIT})
     add_executable(fqueue_limits_test tests/fqueue_limits_test.cxx)
     target_compile_definitions(fqueue_limits_test PRIVATE
         TEST_LEN_LIMIT=${FQUEUE_TEST_LEN_LIMIT}
@@ -99,4 +102,10 @@ if(HOOD_MELVILLE_BUILD_BENCH)
     target_include_directories(fqueue_bench PRIVATE include)
     target_compile_options(fqueue_bench PRIVATE -O3 -march=native -flto -DNDEBUG)
     target_link_options(fqueue_bench PRIVATE -flto)
+    # То же на fqueue_sync (атомарные счётчики ссылок).
+    add_executable(fqueue_bench_sync bench/fqueue_bench.c src/fqueue.c)
+    target_include_directories(fqueue_bench_sync PRIVATE include)
+    target_compile_definitions(fqueue_bench_sync PRIVATE FQUEUE_BENCH_SYNC)
+    target_compile_options(fqueue_bench_sync PRIVATE -O3 -march=native -flto -DNDEBUG)
+    target_link_options(fqueue_bench_sync PRIVATE -flto)
 endif()

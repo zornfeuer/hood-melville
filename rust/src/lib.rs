@@ -5,7 +5,8 @@
 
 mod node;
 mod queue;
+pub mod refcount;
 mod rotation;
 mod stack;
 
-pub use queue::{Iter, Queue};
+pub use queue::{Iter, Queue, SyncQueue};
