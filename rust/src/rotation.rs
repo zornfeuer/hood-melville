@@ -6,47 +6,71 @@
 //! (`step_mut(&mut self)`), как `rotate_step` в C. Готовый фронт возвращается
 //! из шага, а состояние сразу становится `Idle`.
 //!
+//! Раскладка — 32 байта без тега, чтобы `Queue` занимала 64 (одна строка
+//! кэша): у `Reversing` тыл непуст до конца фазы, поэтому хранится как
+//! [`NonEmptyStack`], и нулевой указатель на его месте означает `Appending`
+//! (niche); `Idle` — это `Appending` с пустым `rfront` (в настоящей фазе
+//! `Appending` он непуст: `1 <= ok <= |rfront|`). Счётчик `ok` лежит в
+//! `Queue` и передаётся в методы: внутри enum он добавил бы 8 байт с
+//! выравниванием.
+//!
 //! Переходы по значению (`step(self) -> Step`) читались красивее, но после
-//! компиляции каждый шаг перемещал 48-байтный enum через память и вызывал
+//! компиляции каждый шаг перемещал enum через память и вызывал
 //! `drop_in_place` для заведомо пустых значений; API по значению оставлен
 //! только тестам.
 
 use std::mem;
 
-use crate::stack::Stack;
+use crate::stack::{NonEmptyStack, Stack};
 
 /// Тип длин и счётчика `ok` (см. поля `Queue`); в C — `fqueue_impl_len`.
 pub(crate) type Len = u32;
 
 /// Состояние ротации. Хранит четыре из шести стеков очереди.
-#[derive(Default)]
+///
+/// Счётчик `ok` — сколько элементов старого фронта ещё живы в очереди и не
+/// скопированы в `acc` — хранится снаружи (поле `Queue::ok`); вне ротации он
+/// не используется.
 pub(crate) enum Rotation<T> {
-    /// Ротация не идёт.
-    #[default]
-    Idle,
     /// Параллельно разворачиваются `rear` → `acc` и `front` → `rfront`.
     ///
     /// Инвариант: `|rear| == |front| + 1`, оба уменьшаются на каждом шаге.
     Reversing {
-        /// Сколько элементов старого фронта ещё живы в очереди и не скопированы в `acc`.
-        ok: Len,
         /// Снимок фронта на старте (`old_front` в C).
         front: Stack<T>,
         /// `reverse(front)`, строится по ходу (`rfacc` в C).
         rfront: Stack<T>,
         /// Снимок тыла на старте (`old_rear` в C).
-        rear: Stack<T>,
+        rear: NonEmptyStack<T>,
         /// `reverse(rear)`, будущий хвост нового фронта.
         acc: Stack<T>,
     },
     /// Элементы `rfront` по одному переносятся на вершину `acc`.
     ///
-    /// Инвариант: `1 <= ok <= |rfront|`.
-    Appending {
-        ok: Len,
-        rfront: Stack<T>,
-        acc: Stack<T>,
-    },
+    /// Инвариант: `1 <= ok <= |rfront|`. С пустыми `rfront` и `acc` — `Idle`:
+    /// ротация не идёт ([`Rotation::idle`], [`Rotation::is_idle`]).
+    Appending { rfront: Stack<T>, acc: Stack<T> },
+}
+
+impl<T> Rotation<T> {
+    /// Ротация не идёт.
+    pub(crate) const fn idle() -> Self {
+        Self::Appending {
+            rfront: Stack::new(),
+            acc: Stack::new(),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn is_idle(&self) -> bool {
+        matches!(self, Self::Appending { rfront, .. } if rfront.is_empty())
+    }
+}
+
+impl<T> Default for Rotation<T> {
+    fn default() -> Self {
+        Self::idle()
+    }
 }
 
 // Вручную: derive потребовал бы `T: Clone`, хотя клонируются только указатели на узлы.
@@ -54,22 +78,18 @@ impl<T> Clone for Rotation<T> {
     #[inline]
     fn clone(&self) -> Self {
         match self {
-            Self::Idle => Self::Idle,
             Self::Reversing {
-                ok,
                 front,
                 rfront,
                 rear,
                 acc,
             } => Self::Reversing {
-                ok: *ok,
                 front: front.clone(),
                 rfront: rfront.clone(),
                 rear: rear.clone(),
                 acc: acc.clone(),
             },
-            Self::Appending { ok, rfront, acc } => Self::Appending {
-                ok: *ok,
+            Self::Appending { rfront, acc } => Self::Appending {
                 rfront: rfront.clone(),
                 acc: acc.clone(),
             },
@@ -80,27 +100,23 @@ impl<T> Clone for Rotation<T> {
 /// Результат одного перехода (API по значению; используется в тестах).
 #[cfg(test)]
 pub(crate) enum Step<T> {
-    Running(Rotation<T>),
+    /// Ротация идёт; второе поле — `ok`.
+    Running(Rotation<T>, Len),
     /// Ротация завершена; внутри — новый фронт очереди.
     Done(Stack<T>),
 }
 
 impl<T: Clone> Rotation<T> {
-    /// Начать ротацию — аналог `start_rotation`.
+    /// Начать ротацию — аналог `start_rotation`; `ok` становится `front_len`.
     ///
     /// `front` разделяет узлы с живым фронтом очереди; `rear` забирается
-    /// у очереди целиком, `front_len == |front|`.
+    /// у очереди целиком.
     #[inline]
-    pub(crate) fn start(front: Stack<T>, front_len: Len, rear: Stack<T>) -> Self {
-        debug_assert!(
-            !rear.is_empty(),
-            "ротация начинается при |rear| = |front| + 1"
-        );
+    pub(crate) fn start(front: Stack<T>, rear: Stack<T>) -> Self {
         Self::Reversing {
-            ok: front_len,
             front,
             rfront: Stack::new(),
-            rear,
+            rear: NonEmptyStack::new(rear).expect("ротация начинается при |rear| = |front| + 1"),
             acc: Stack::new(),
         }
     }
@@ -108,35 +124,31 @@ impl<T: Clone> Rotation<T> {
     /// Один шаг ротации на месте — аналог `rotate_step`. По завершении
     /// возвращает новый фронт, а состояние становится `Idle`.
     #[inline]
-    pub(crate) fn step_mut(&mut self) -> Option<Stack<T>> {
+    pub(crate) fn step_mut(&mut self, ok: &mut Len) -> Option<Stack<T>> {
         match self {
-            Self::Idle => None,
             Self::Reversing {
-                ok,
                 front,
                 rfront,
                 rear,
                 acc,
             } => {
-                let y = rear.pop().expect("Reversing: rear не пуст до конца фазы");
+                let Some(y) = rear.pop_unless_last() else {
+                    return self.finish_reversing(*ok);
+                };
                 acc.push(y);
                 if let Some(x) = front.pop() {
                     rfront.push(x);
                 }
-                if !rear.is_empty() {
-                    return None;
-                }
-                debug_assert!(front.is_empty(), "front исчерпывается вместе с rear");
-                let (ok, rfront, acc) = (*ok, mem::take(rfront), mem::take(acc));
-                self.enter_appending(ok, rfront, acc)
+                None
             }
-            Self::Appending { ok, rfront, acc } => {
-                let x = rfront.pop().expect("Appending: ok <= |rfront|");
+            Self::Appending { rfront, acc } => {
+                // Пустой `rfront` — `Idle`.
+                let x = rfront.pop()?;
                 acc.push(x);
                 *ok -= 1;
                 if *ok == 0 {
                     let acc = mem::take(acc);
-                    *self = Self::Idle;
+                    *self = Self::idle();
                     Some(acc)
                 } else {
                     None
@@ -145,25 +157,47 @@ impl<T: Clone> Rotation<T> {
         }
     }
 
+    /// Последний шаг `Reversing`: тыл из одного элемента расходуется, фаза
+    /// переходит в `Appending` (или сразу завершается).
+    #[cold]
+    fn finish_reversing(&mut self, ok: Len) -> Option<Stack<T>> {
+        let Self::Reversing {
+            mut front,
+            mut rfront,
+            rear,
+            mut acc,
+        } = mem::take(self)
+        else {
+            unreachable!("вызывается только из Reversing");
+        };
+        acc.push(rear.into_last());
+        if let Some(x) = front.pop() {
+            rfront.push(x);
+        }
+        debug_assert!(front.is_empty(), "front исчерпывается вместе с rear");
+        self.enter_appending(ok, rfront, acc)
+    }
+
     /// Учесть `pop` из живого фронта очереди во время ротации.
     ///
     /// Выброшенный элемент старого фронта больше не нужно копировать в `acc`,
     /// поэтому `ok` уменьшается. Если копировать больше нечего, `acc` уже
     /// является новым фронтом — он возвращается, состояние становится `Idle`.
+    /// Вне ротации ничего не делает.
     #[inline]
-    pub(crate) fn invalidate_mut(&mut self) -> Option<Stack<T>> {
+    pub(crate) fn invalidate_mut(&mut self, ok: &mut Len) -> Option<Stack<T>> {
         const MSG: &str = "pop во время ротации: ok > 0, иначе фронт очереди пуст";
         match self {
-            Self::Idle => None,
-            Self::Reversing { ok, .. } => {
+            Self::Reversing { .. } => {
                 *ok = ok.checked_sub(1).expect(MSG);
                 None
             }
-            Self::Appending { ok, acc, .. } => {
+            Self::Appending { rfront, .. } if rfront.is_empty() => None,
+            Self::Appending { acc, .. } => {
                 *ok = ok.checked_sub(1).expect(MSG);
                 if *ok == 0 {
                     let acc = mem::take(acc);
-                    *self = Self::Idle;
+                    *self = Self::idle();
                     Some(acc)
                 } else {
                     None
@@ -179,27 +213,27 @@ impl<T: Clone> Rotation<T> {
     #[inline]
     fn enter_appending(&mut self, ok: Len, rfront: Stack<T>, acc: Stack<T>) -> Option<Stack<T>> {
         if ok == 0 {
-            *self = Self::Idle;
+            *self = Self::idle();
             Some(acc)
         } else {
-            *self = Self::Appending { ok, rfront, acc };
+            *self = Self::Appending { rfront, acc };
             None
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn step(mut self) -> Step<T> {
-        match self.step_mut() {
+    pub(crate) fn step(mut self, mut ok: Len) -> Step<T> {
+        match self.step_mut(&mut ok) {
             Some(front) => Step::Done(front),
-            None => Step::Running(self),
+            None => Step::Running(self, ok),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn invalidate(mut self) -> Step<T> {
-        match self.invalidate_mut() {
+    pub(crate) fn invalidate(mut self, mut ok: Len) -> Step<T> {
+        match self.invalidate_mut(&mut ok) {
             Some(front) => Step::Done(front),
-            None => Step::Running(self),
+            None => Step::Running(self, ok),
         }
     }
 }
@@ -209,7 +243,7 @@ impl<T: Clone> Step<T> {
     /// Ещё один шаг; на завершённой ротации ничего не делает.
     pub(crate) fn step(self) -> Self {
         match self {
-            Self::Running(rot) => rot.step(),
+            Self::Running(rot, ok) => rot.step(ok),
             done @ Self::Done(_) => done,
         }
     }
@@ -239,44 +273,50 @@ mod tests {
         (stack(&front), stack(&rear))
     }
 
-    fn start(f: usize) -> Rotation<usize> {
+    fn start(f: usize) -> Step<usize> {
         let (front, rear) = fixture(f);
-        Rotation::start(front, Len::try_from(f).unwrap(), rear)
+        Step::Running(Rotation::start(front, rear), Len::try_from(f).unwrap())
     }
 
     /// Прогнать ротацию до конца; перед шагом `i` вызвать `invalidate`,
     /// если `pop_before(i)`. Возвращает (новый фронт, число шагов, число pop).
     fn run(
-        mut rot: Rotation<usize>,
+        mut step: Step<usize>,
         pop_before: impl Fn(usize) -> bool,
     ) -> (Vec<usize>, usize, usize) {
         let (mut steps, mut pops) = (0, 0);
         loop {
-            let mut next = if pop_before(steps) {
-                pops += 1;
-                rot.invalidate()
-            } else {
-                Step::Running(rot)
-            };
-            if let Step::Running(r) = next {
-                steps += 1;
-                next = r.step();
+            if let Step::Running(rot, ok) = step {
+                step = if pop_before(steps) {
+                    pops += 1;
+                    rot.invalidate(ok)
+                } else {
+                    Step::Running(rot, ok)
+                };
             }
-            match next {
-                Step::Done(front) => return (to_vec(&front), steps, pops),
-                Step::Running(r) => rot = r,
+            if let Step::Running(rot, ok) = step {
+                steps += 1;
+                step = rot.step(ok);
+            }
+            if let Step::Done(front) = step {
+                return (to_vec(&front), steps, pops);
             }
         }
     }
 
     #[test]
+    fn layout_has_no_tag() {
+        assert_eq!(size_of::<Rotation<i32>>(), 4 * size_of::<usize>());
+    }
+
+    #[test]
     fn idle_stays_idle() {
         let rot: Rotation<usize> = Rotation::default();
-        assert!(matches!(rot, Rotation::Idle));
-        assert!(matches!(rot.step(), Step::Running(Rotation::Idle)));
+        assert!(rot.is_idle());
+        assert!(matches!(rot.step(0), Step::Running(r, 0) if r.is_idle()));
         assert!(matches!(
-            Rotation::<usize>::Idle.invalidate(),
-            Step::Running(Rotation::Idle)
+            Rotation::<usize>::idle().invalidate(0),
+            Step::Running(r, 0) if r.is_idle()
         ));
     }
 
@@ -292,13 +332,13 @@ mod tests {
     #[test]
     fn phases_take_f_plus_one_then_f_steps() {
         let f = 3;
-        let mut step = Step::Running(start(f));
+        let mut step = start(f);
         for _ in 0..f {
             step = step.step();
-            assert!(matches!(step, Step::Running(Rotation::Reversing { .. })));
+            assert!(matches!(step, Step::Running(Rotation::Reversing { .. }, _)));
         }
         step = step.step();
-        let Step::Running(Rotation::Appending { ok, rfront, acc }) = &step else {
+        let Step::Running(Rotation::Appending { rfront, acc }, ok) = &step else {
             panic!("после f + 1 шагов ожидалась фаза Appending");
         };
         assert_eq!(*ok, 3);
@@ -307,7 +347,9 @@ mod tests {
 
         for _ in 0..f - 1 {
             step = step.step();
-            assert!(matches!(step, Step::Running(Rotation::Appending { .. })));
+            assert!(
+                matches!(&step, Step::Running(r @ Rotation::Appending { .. }, _) if !r.is_idle())
+            );
         }
         let Step::Done(front) = step.step() else {
             panic!("после 2f + 1 шагов ожидалось завершение");
@@ -318,8 +360,8 @@ mod tests {
     #[test]
     fn rotation_does_not_modify_source_stacks() {
         let (front, rear) = fixture(4);
-        let rot = Rotation::start(front.clone(), 4, rear.clone());
-        let (result, _, _) = run(rot, |_| false);
+        let rot = Rotation::start(front.clone(), rear.clone());
+        let (result, _, _) = run(Step::Running(rot, 4), |_| false);
         assert_eq!(result, (1..=9).collect::<Vec<_>>());
         assert_eq!(to_vec(&front), [1, 2, 3, 4]);
         assert_eq!(to_vec(&rear), [9, 8, 7, 6, 5]);
@@ -328,11 +370,10 @@ mod tests {
     #[test]
     fn invalidate_in_appending_with_last_ok_finishes_immediately() {
         let rot = Rotation::Appending {
-            ok: 1,
             rfront: stack(&[2, 1]),
             acc: stack(&[3, 4]),
         };
-        let Step::Done(front) = rot.invalidate() else {
+        let Step::Done(front) = rot.invalidate(1) else {
             panic!("ok стал 0 — acc уже новый фронт");
         };
         assert_eq!(to_vec(&front), [3, 4]);
@@ -341,8 +382,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "ok > 0")]
     fn invalidate_past_zero_panics() {
-        let rot = Rotation::<usize>::start(Stack::new(), 0, stack(&[1, 2]));
-        let _ = rot.invalidate();
+        let rot = Rotation::<usize>::start(Stack::new(), stack(&[1, 2]));
+        let _ = rot.invalidate(0);
     }
 
     /// Все размеры фронта и все расписания pop'ов «каждые `gap` шагов, не

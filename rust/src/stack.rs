@@ -92,6 +92,53 @@ impl<T> Stack<T> {
     }
 }
 
+/// Непустой стек: вершина есть всегда. Указатель на неё ненулевой, и
+/// `Rotation` кодирует свой второй вариант нулём на его месте (niche) — без
+/// отдельного тега.
+pub(crate) struct NonEmptyStack<T>(NodePtr<T>);
+
+impl<T> NonEmptyStack<T> {
+    #[inline]
+    pub(crate) fn new(stack: Stack<T>) -> Option<Self> {
+        stack.0.map(Self)
+    }
+
+    /// Снимает вершину и возвращает её значение, если под ней есть ещё
+    /// элементы; иначе `None`, стек не меняется (см. [`Self::into_last`]).
+    #[inline]
+    pub(crate) fn pop_unless_last(&mut self) -> Option<T>
+    where
+        T: Clone,
+    {
+        self.0.advance_unless_last()
+    }
+
+    /// Значение вершины стека из одного элемента; стек расходуется.
+    #[inline]
+    pub(crate) fn into_last(self) -> T
+    where
+        T: Clone,
+    {
+        debug_assert!(self.0.next().is_none());
+        match self.0.into_parts() {
+            Ok((value, _)) => value,
+            Err(shared) => shared.value().clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn iter(&self) -> Iter<'_, T> {
+        Iter(Some(&self.0))
+    }
+}
+
+impl<T> Clone for NonEmptyStack<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 // Ручные реализации вместо derive: derive потребовал бы `T: Clone` / `T: Default`,
 // хотя клонируется только указатель на узел.
 impl<T> Clone for Stack<T> {

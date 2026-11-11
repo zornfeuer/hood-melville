@@ -84,6 +84,41 @@ impl<T> NodePtr<T> {
         Ok((value, next))
     }
 
+    /// Заменить `self` ссылкой на следующий узел и вернуть значение узла —
+    /// как `into_parts`, но на месте; `None`, если следующего узла нет
+    /// (`self` тогда не меняется). Для непустого стека (`NonEmptyStack`),
+    /// который не может временно остаться без вершины.
+    ///
+    /// Единственный владелец забирает значение из узла, а ссылка узла на
+    /// хвост переходит к `self` без изменения счётчика; разделяемый узел
+    /// остаётся другим версиям, значение клонируется.
+    #[inline]
+    pub(crate) fn advance_unless_last(&mut self) -> Option<T>
+    where
+        T: Clone,
+    {
+        let next = self.inner().next.as_ref()?;
+        if self.inner().refs.get() != 1 {
+            // Паника `clone` оставляет `self` нетронутым.
+            let value = self.value().clone();
+            *self = next.clone();
+            return Some(value);
+        }
+        // SAFETY: `refs == 1` — других `NodePtr` на узел нет; указатель из
+        // `Box::leak`, владение возвращается `Box` ровно раз. До записи
+        // `self.ptr` ниже ничто не паникует и не читает `self`: висячий
+        // указатель не виден ни `Drop`, ни вызывающему.
+        let node = unsafe { Box::from_raw(self.ptr.as_ptr()) };
+        let NodeBox { value, next, .. } = *node;
+        // `next` проверен выше и с тех пор не менялся.
+        let Some(next) = next else {
+            std::process::abort()
+        };
+        self.ptr = ManuallyDrop::new(next).ptr;
+        self.touch();
+        Some(value)
+    }
+
     /// Прочитать счётчик узла, чтобы его строка кэша начала загружаться
     /// заранее, вне критического пути следующего шага.
     ///

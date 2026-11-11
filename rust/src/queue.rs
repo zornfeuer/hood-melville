@@ -44,11 +44,14 @@ use crate::stack::Stack;
 /// assert!(q2.pop().unwrap().pop().is_none());
 /// ```
 pub struct Queue<T> {
-    // u32, а не usize: структура меньше (72 байта вместо 88). Предел —
+    // u32, а не usize, и `ok` здесь, а не в `Rotation`: структура — 64
+    // байта, одна строка кэша (с usize — 88, с `ok` в ротации — 72). Предел —
     // u32::MAX элементов, переполнение проверяется в `push_mut`.
     len: Len,
     front_len: Len,
     rear_len: Len,
+    /// Счётчик `ok` текущей ротации (см. `Rotation`); вне ротации — 0.
+    ok: Len,
     /// Голова — первый элемент очереди; отсюда `pop`.
     front: Stack<T>,
     /// Голова — последний добавленный элемент; сюда `push`.
@@ -64,9 +67,10 @@ impl<T> Queue<T> {
             len: 0,
             front_len: 0,
             rear_len: 0,
+            ok: 0,
             front: Stack::new(),
             rear: Stack::new(),
-            rot: Rotation::Idle,
+            rot: Rotation::idle(),
         }
     }
 
@@ -154,7 +158,7 @@ impl<T: Clone> Queue<T> {
         self.rear.push(value);
         self.rear_len += 1;
         self.len = len;
-        if matches!(self.rot, Rotation::Idle) {
+        if self.rot.is_idle() {
             self.start_rotation_if_needed();
         }
         self.advance_rotation();
@@ -203,9 +207,9 @@ impl<T: Clone> Queue<T> {
         let taken = take(&mut self.front)?;
         self.front_len -= 1;
         self.len -= 1;
-        if matches!(self.rot, Rotation::Idle) {
+        if self.rot.is_idle() {
             self.start_rotation_if_needed();
-        } else if let Some(front) = self.rot.invalidate_mut() {
+        } else if let Some(front) = self.rot.invalidate_mut(&mut self.ok) {
             self.install_front(front);
         }
         self.advance_rotation();
@@ -221,14 +225,18 @@ impl<T: Clone> Queue<T> {
         }
         self.rear_len = 0;
         let rear = mem::take(&mut self.rear);
-        self.rot = Rotation::start(self.front.clone(), self.front_len, rear);
+        // Лемма 1 в `docs/proof.md`: старт при `len = 2 * front_len + 1`,
+        // отсюда граница `ok` (лемма 4).
+        debug_assert_eq!(u64::from(self.len), 2 * u64::from(self.front_len) + 1);
+        self.ok = self.front_len;
+        self.rot = Rotation::start(self.front.clone(), rear);
     }
 
     /// `ROTATION_STEPS` шагов ротации на операцию.
     #[inline]
     fn advance_rotation(&mut self) {
         for _ in 0..ROTATION_STEPS {
-            if let Some(front) = self.rot.step_mut() {
+            if let Some(front) = self.rot.step_mut(&mut self.ok) {
                 self.install_front(front);
             }
         }
@@ -251,6 +259,7 @@ impl<T> Clone for Queue<T> {
             len: self.len,
             front_len: self.front_len,
             rear_len: self.rear_len,
+            ok: self.ok,
             front: self.front.clone(),
             rear: self.rear.clone(),
             rot: self.rot.clone(),
@@ -353,15 +362,16 @@ mod tests {
             assert_eq!(self.rear.iter().count(), self.rear_len as usize);
             assert_eq!(self.front.is_empty(), self.is_empty());
             match &self.rot {
-                Rotation::Idle => {
+                rot if rot.is_idle() => {
                     assert_eq!(self.len, self.front_len + self.rear_len);
                     assert!(self.rear_len <= self.front_len);
+                    assert!(matches!(rot, Rotation::Appending { acc, .. } if acc.is_empty()));
                 }
                 Rotation::Reversing { front, rear, .. } => {
                     assert_eq!(rear.iter().count(), front.iter().count() + 1);
                 }
-                Rotation::Appending { ok, rfront, .. } => {
-                    assert!((1..=rfront.iter().count()).contains(&(*ok as usize)));
+                Rotation::Appending { rfront, .. } => {
+                    assert!((1..=rfront.iter().count()).contains(&(self.ok as usize)));
                 }
             }
         }
@@ -369,6 +379,11 @@ mod tests {
 
     fn contents<T: Clone>(q: &Queue<T>) -> Vec<T> {
         q.iter().collect()
+    }
+
+    #[test]
+    fn queue_fits_a_cache_line() {
+        assert_eq!(size_of::<Queue<i32>>(), 64);
     }
 
     #[test]
@@ -631,7 +646,7 @@ mod tests {
                 "Reversing"
             };
             let actual = match q.rot {
-                Rotation::Idle => "Idle",
+                ref rot if rot.is_idle() => "Idle",
                 Rotation::Reversing { .. } => "Reversing",
                 Rotation::Appending { .. } => "Appending",
             };
