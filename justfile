@@ -64,6 +64,9 @@ bench-build:
 
 # Сценарии и размеры по умолчанию для сравнений.
 bench_cases := "--case fill:1000000 --case mixed:1000000 --case persistent:1000000 --case branching:1000000 --case fill:10000000 --case mixed:10000000"
+# Отдельный бенчмарк операций на месте (fill_mut, mixed_mut) рядом с теми же
+# историями через персистентные операции.
+bench_cases_mut := "--case fill:1000000 --case fill_mut:1000000 --case mixed:1000000 --case mixed_mut:1000000 --case fill:10000000 --case fill_mut:10000000 --case mixed:10000000 --case mixed_mut:10000000"
 
 # Варианты раскладки кода (выравнивание функций и циклов, байт). Склонность к
 # медленному режиму аллокатора зависит от раскладки сборки, поэтому реализации
@@ -101,6 +104,17 @@ bench-compare-layouts rounds="8": (bench-layouts "cur")
     done
     python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-layouts \
         {{bench_cases}} "${bins[@]}"
+
+# C против Rust на операциях на месте, по 4 раскладкам.
+bench-compare-mut rounds="8": (bench-layouts "cur")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bins=()
+    for impl in C Rust; do
+        for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
+    done
+    python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-mut \
+        {{bench_cases_mut}} "${bins[@]}"
 
 # A/B двух наборов раскладок одной реализации (собранных bench-layouts <label>):
 # just bench-ab-layouts ctl exp Rust [rounds].

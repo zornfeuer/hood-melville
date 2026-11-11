@@ -2,7 +2,9 @@
 // Rust-двойник: rust/examples/fqueue_bench.rs —
 // сценарии и контрольная сумма должны совпадать один в один.
 //
-// Использование: fqueue_bench <fill|mixed|persistent|branching> <N>
+// Использование: fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut> <N>
+// fill_mut, mixed_mut — те же истории через fqueue_push_in_place /
+// fqueue_pop_in_place (отдельный бенчмарк, `just bench-compare-mut`).
 // Печатает контрольную сумму извлечённых значений (зависит от порядка).
 // С FQ_PHASES=1 печатает в stderr длительность фаз (build/drain/destroy).
 
@@ -113,6 +115,46 @@ static uint64_t run_mixed(int n) {
   return h;
 }
 
+// fill и mixed через операции на месте: одна версия, без копий и
+// освобождения старой. Контрольные суммы совпадают с fill и mixed.
+static int pop_value(fqueue *q) {
+  int v = 0;
+  check(fqueue_pop_in_place(q, &v));
+  return v;
+}
+
+static uint64_t run_fill_mut(int n) {
+  uint64_t h = 0;
+  fqueue q;
+  fqueue_init(&q);
+  for (int i = 0; i < n; ++i)
+    check(fqueue_push_in_place(&q, i));
+  phase("build");
+  while (!fqueue_is_empty(&q))
+    h = mix(h, pop_value(&q));
+  phase("drain");
+  fqueue_destroy(&q);
+  return h;
+}
+
+static uint64_t run_mixed_mut(int n) {
+  uint64_t h = 0;
+  int i = 0;
+  fqueue q;
+  fqueue_init(&q);
+  while (fqueue_size(&q) < (size_t)n) {
+    check(fqueue_push_in_place(&q, i++));
+    check(fqueue_push_in_place(&q, i++));
+    h = mix(h, pop_value(&q));
+  }
+  phase("build");
+  while (!fqueue_is_empty(&q))
+    h = mix(h, pop_value(&q));
+  phase("drain");
+  fqueue_destroy(&q);
+  return h;
+}
+
 typedef struct {
   fqueue *items;
   size_t  len;
@@ -215,7 +257,8 @@ static uint64_t run_branching(int n) {
 
 int main(int argc, char **argv) {
   if (argc != 3) {
-    fprintf(stderr, "usage: %s <fill|mixed|persistent|branching> <N>\n", argv[0]);
+    fprintf(stderr, "usage: %s <fill|mixed|persistent|branching|fill_mut|mixed_mut> <N>\n",
+            argv[0]);
     return 2;
   }
   int n = atoi(argv[2]);
@@ -231,6 +274,10 @@ int main(int argc, char **argv) {
     h = run_persistent(n);
   else if (strcmp(argv[1], "branching") == 0)
     h = run_branching(n);
+  else if (strcmp(argv[1], "fill_mut") == 0)
+    h = run_fill_mut(n);
+  else if (strcmp(argv[1], "mixed_mut") == 0)
+    h = run_mixed_mut(n);
   else {
     fprintf(stderr, "unknown scenario: %s\n", argv[1]);
     return 2;

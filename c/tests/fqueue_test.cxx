@@ -392,9 +392,28 @@ static void explore(const fqueue *q, std::deque<int> &model, int depth,
   REQUIRE(fqueue_front(q, &v) == !model.empty());
   if (!model.empty()) REQUIRE(v == model.front());
 
+  std::vector<int> expected(model.begin(), model.end());
   fqueue c;
   REQUIRE(fqueue_clone(&c, q) == FQUEUE_OK);
-  REQUIRE(contents(&c) == std::vector<int>(model.begin(), model.end()));
+  REQUIRE(contents(&c) == expected);
+
+  // In-place operations on the clone, which shares every node with q.
+  REQUIRE(fqueue_push_in_place(&c, -1) == FQUEUE_OK);
+  expected.push_back(-1);
+  REQUIRE(contents(&c) == expected);
+  v = -2;
+  REQUIRE(fqueue_pop_in_place(&c, &v) == FQUEUE_OK);
+  REQUIRE(v == expected.front());
+  expected.erase(expected.begin());
+  REQUIRE(contents(&c) == expected);
+  if (!expected.empty()) {
+    REQUIRE(fqueue_pop_in_place(&c, nullptr) == FQUEUE_OK);
+    expected.erase(expected.begin());
+    REQUIRE(contents(&c) == expected);
+  } else {
+    REQUIRE(fqueue_pop_in_place(&c, &v) == FQUEUE_EMPTY);
+  }
+  REQUIRE(contents(q) == std::vector<int>(model.begin(), model.end()));
   fqueue_destroy(&c);
   if (depth == 0) return;
 
@@ -426,6 +445,41 @@ TEST_CASE("fqueue exhaustive short histories match a reference model",
   long states = 0;
   explore(&q, model, 16, states);
   REQUIRE(states > 20000);
+  fqueue_destroy(&q);
+}
+
+TEST_CASE("fqueue in-place operations on a version owned alone match a model",
+          "[fqueue]") {
+  // No other version shares the nodes, so every advance frees them; pushes
+  // and pops in varying proportions run rotations over many lengths.
+  fqueue q;
+  fqueue_init(&q);
+  std::deque<int> model;
+  uint64_t x = 0x2545F4914F6CDD1Du;
+  for (int k = 0; k < 20000; ++k) {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    bool pop = (x >> 40) % ((k / 2000) % 2 ? 3 : 5) < 2;
+    if (pop) {
+      int v = -1;
+      fqueue_status s = fqueue_pop_in_place(&q, &v);
+      if (model.empty()) {
+        REQUIRE(s == FQUEUE_EMPTY);
+        REQUIRE(v == -1);
+      } else {
+        REQUIRE(s == FQUEUE_OK);
+        REQUIRE(v == model.front());
+        model.pop_front();
+      }
+    } else {
+      REQUIRE(fqueue_push_in_place(&q, k) == FQUEUE_OK);
+      model.push_back(k);
+    }
+    REQUIRE(fqueue_size(&q) == model.size());
+    if (!model.empty()) REQUIRE(front_of(&q) == model.front());
+  }
+  REQUIRE(contents(&q) == std::vector<int>(model.begin(), model.end()));
   fqueue_destroy(&q);
 }
 

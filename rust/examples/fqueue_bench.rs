@@ -2,7 +2,10 @@
 //! C-двойник: `c/c/bench/fqueue_bench.c` — сценарии и контрольная сумма должны
 //! совпадать один в один.
 //!
-//! Использование: `fqueue_bench <fill|mixed|persistent|branching> <N>`.
+//! Использование:
+//! `fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut> <N>`.
+//! `fill_mut`, `mixed_mut` — те же истории через `push_mut`/`pop_mut`
+//! (отдельный бенчмарк, `just bench-compare-mut`).
 //! Печатает контрольную сумму извлечённых значений (зависит от порядка).
 //! С `FQ_PHASES=1` печатает в stderr длительность фаз (build/drain/destroy).
 
@@ -71,6 +74,44 @@ fn run_mixed(n: i32, ph: &mut Phases) -> u64 {
     while let Some(next) = q.pop() {
         h = mix_front(h, &q);
         q = next;
+    }
+    ph.mark("drain");
+    h
+}
+
+/// fill и mixed через операции на месте: одна версия, без копий и
+/// освобождения старой. Контрольные суммы совпадают с fill и mixed.
+fn pop_value(q: &mut Queue<i32>) -> i32 {
+    q.pop_mut().expect("очередь не пуста")
+}
+
+fn run_fill_mut(n: i32, ph: &mut Phases) -> u64 {
+    let mut h = 0;
+    let mut q = Queue::new();
+    for i in 0..n {
+        q.push_mut(i);
+    }
+    ph.mark("build");
+    while !q.is_empty() {
+        h = mix(h, pop_value(&mut q));
+    }
+    ph.mark("drain");
+    h
+}
+
+fn run_mixed_mut(n: i32, ph: &mut Phases) -> u64 {
+    let n = usize::try_from(n).unwrap();
+    let (mut h, mut i) = (0, 0);
+    let mut q = Queue::new();
+    while q.len() < n {
+        q.push_mut(i);
+        q.push_mut(i + 1);
+        i += 2;
+        h = mix(h, pop_value(&mut q));
+    }
+    ph.mark("build");
+    while !q.is_empty() {
+        h = mix(h, pop_value(&mut q));
     }
     ph.mark("drain");
     h
@@ -154,7 +195,7 @@ fn run_branching(n: i32, ph: &mut Phases) -> u64 {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let [_, scenario, n] = args.as_slice() else {
-        eprintln!("usage: fqueue_bench <fill|mixed|persistent|branching> <N>");
+        eprintln!("usage: fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut> <N>");
         return ExitCode::from(2);
     };
     let Ok(n) = n.parse() else {
@@ -170,6 +211,8 @@ fn main() -> ExitCode {
         "mixed" => run_mixed(n, &mut ph),
         "persistent" => run_persistent(n, &mut ph),
         "branching" => run_branching(n, &mut ph),
+        "fill_mut" => run_fill_mut(n, &mut ph),
+        "mixed_mut" => run_mixed_mut(n, &mut ph),
         _ => {
             eprintln!("unknown scenario: {scenario}");
             return ExitCode::from(2);

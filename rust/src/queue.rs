@@ -110,7 +110,7 @@ impl<T: Clone> Queue<T> {
             return None;
         }
         let mut q = self.clone();
-        q.pop_mut();
+        q.pop_front_mut();
         Some(q)
     }
 
@@ -123,13 +123,33 @@ impl<T: Clone> Queue<T> {
         Iter(self.clone())
     }
 
-    // `push`/`pop` по месту. Наружу не видны: персистентность обеспечивают
-    // публичные обёртки, а итератор и `Extend` работают со своей копией.
-
+    /// Добавляет `value` в конец самой этой версии — аналог
+    /// `fqueue_push_in_place`. То же, что `*self = self.push(value)`, но без
+    /// копирования версии и освобождения старой; версии, с которыми `self`
+    /// делит узлы, не меняются. Сложность — как у этого присваивания (см.
+    /// [`Queue`]): сама операция O(1), освобождение узлов, которыми версия
+    /// владела одна, может стоить больше.
+    ///
+    /// ```
+    /// use hood_melville::Queue;
+    ///
+    /// let mut q = Queue::new();
+    /// q.push_mut(1);
+    /// let old = q.clone();
+    /// q.push_mut(2);
+    /// assert_eq!(q.len(), 2);
+    /// assert_eq!(old.len(), 1);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Если в очереди уже `u32::MAX` элементов; `self` тогда не меняется.
+    /// Паника `T::clone` (значения из узлов, общих с другими версиями,
+    /// клонируются при шаге ротации) оставляет `self` безопасным для
+    /// использования и удаления, но с неопределённым содержимым.
     #[inline]
-    fn push_mut(&mut self, value: T) {
-        // Проверка до любых изменений: при панике (через `Extend` очередь
-        // изменяется по месту) она остаётся согласованной.
+    pub fn push_mut(&mut self, value: T) {
+        // Проверка до любых изменений: при панике очередь не меняется.
         let len = self.len.checked_add(1).expect("очередь длиннее u32::MAX");
         self.rear.push(value);
         self.rear_len += 1;
@@ -140,10 +160,47 @@ impl<T: Clone> Queue<T> {
         self.advance_rotation();
     }
 
+    /// Снимает первый элемент с самой этой версии и возвращает его или `None`
+    /// для пустой — аналог `fqueue_pop_in_place`; см. [`push_mut`](Self::push_mut).
+    /// Если узлом первого элемента владеет только `self`, значение забирается
+    /// без клонирования.
+    ///
+    /// ```
+    /// use hood_melville::Queue;
+    ///
+    /// let mut q: Queue<_> = (1..=3).collect();
+    /// assert_eq!(q.pop_mut(), Some(1));
+    /// assert_eq!(q.front(), Some(&2));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Как у [`push_mut`](Self::push_mut): только при панике `T::clone`.
     #[inline]
-    fn pop_mut(&mut self) {
+    pub fn pop_mut(&mut self) -> Option<T> {
+        self.pop_front_with(Stack::pop)
+    }
+
+    /// `pop` по месту без значения — для персистентного `pop`.
+    #[inline]
+    fn pop_front_mut(&mut self) {
         debug_assert!(!self.is_empty());
-        self.front.advance();
+        self.pop_front_with(|front| {
+            front.advance();
+            Some(())
+        });
+    }
+
+    /// `pop` по месту: `take` снимает вершину фронта (`None` — очередь пуста,
+    /// ничего не меняется), затем счётчики и шаг ротации.
+    ///
+    /// Обобщённая, а не общая функция: каждый вызывающий получает свою копию.
+    /// С одной общей функцией для `pop_front_mut` и `pop_mut` LLVM иначе
+    /// встраивал персистентный `pop` — лишняя копия `Option<Queue>`, +9
+    /// инструкций на операцию.
+    #[inline]
+    fn pop_front_with<R>(&mut self, take: impl FnOnce(&mut Stack<T>) -> Option<R>) -> Option<R> {
+        let taken = take(&mut self.front)?;
         self.front_len -= 1;
         self.len -= 1;
         if matches!(self.rot, Rotation::Idle) {
@@ -152,6 +209,7 @@ impl<T: Clone> Queue<T> {
             self.install_front(front);
         }
         self.advance_rotation();
+        Some(taken)
     }
 
     /// Аналог `start_rotation`: запускается, как только `|rear| > |front|`.
@@ -247,9 +305,7 @@ impl<T: Clone> Iterator for Iter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
-        let value = self.0.front()?.clone();
-        self.0.pop_mut();
-        Some(value)
+        self.0.pop_mut()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -415,6 +471,94 @@ mod tests {
         for (q, m) in &versions {
             assert!(q.iter().eq(m.iter().copied()));
         }
+    }
+
+    /// `push_mut`/`pop_mut` над случайными версиями истории, которые делят
+    /// узлы с остальными: результат совпадает с моделью, прочие версии не
+    /// меняются. Через версии, ставшие единственными владельцами своих
+    /// узлов, проходит и путь без клонирования.
+    #[test]
+    fn in_place_operations_match_model_and_keep_other_versions() {
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let mut versions = vec![(Queue::new(), VecDeque::new())];
+        let ops = if cfg!(miri) { 300 } else { 5_000_u64 };
+        for i in 0..ops {
+            let r = next();
+            let idx = usize::try_from(r % versions.len() as u64).unwrap();
+            match r >> 40 & 15 {
+                // Новая версия-копия, общая со старой по всем узлам.
+                0 | 1 => {
+                    let copy = versions[idx].clone();
+                    versions.push(copy);
+                }
+                // Удаление: часть узлов остаётся у единственного владельца.
+                2 if versions.len() > 1 => {
+                    versions.swap_remove(idx);
+                }
+                3..=8 => {
+                    let (q, m) = &mut versions[idx];
+                    assert_eq!(q.pop_mut(), m.pop_front());
+                }
+                _ => {
+                    let (q, m) = &mut versions[idx];
+                    q.push_mut(i);
+                    m.push_back(i);
+                }
+            }
+            if let Some((q, m)) = versions.get(idx) {
+                q.check_invariants();
+                assert_eq!(q.len(), m.len());
+                assert_eq!(q.front(), m.front());
+            }
+        }
+
+        let (min_versions, min_len) = if cfg!(miri) { (3, 5) } else { (10, 20) };
+        assert!(versions.len() > min_versions);
+        assert!(versions.iter().any(|(q, _)| q.len() > min_len));
+        for (q, m) in &versions {
+            q.check_invariants();
+            assert!(q.iter().eq(m.iter().copied()));
+        }
+    }
+
+    #[test]
+    fn pop_mut_moves_value_out_of_unshared_node() {
+        #[derive(Debug, PartialEq)]
+        struct Counted(u32);
+        static CLONES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        impl Clone for Counted {
+            fn clone(&self) -> Self {
+                CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Self(self.0)
+            }
+        }
+
+        let clones = || CLONES.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Одноэлементная очередь: ротация завершается за один шаг и переносит
+        // значение из уникального узла `rear`, ничего не клонируя.
+        let mut q = Queue::new();
+        q.push_mut(Counted(7));
+        assert_eq!(clones(), 0);
+
+        // Узел общий с копией — значение клонируется, копия не меняется.
+        let copy = q.clone();
+        assert_eq!(q.pop_mut(), Some(Counted(7)));
+        assert_eq!(clones(), 1);
+        assert_eq!(copy.front(), Some(&Counted(7)));
+
+        // Узлом владеет только `copy` — значение забирается из узла.
+        let mut copy = copy;
+        assert_eq!(copy.pop_mut(), Some(Counted(7)));
+        assert_eq!(clones(), 1);
+        assert_eq!(copy.pop_mut(), None);
     }
 
     /// Все истории push/pop длиной до `DEPTH` (≈10⁵ состояний): инварианты

@@ -25,6 +25,10 @@ Processing Letters*, 1981, 13(2), 50–54](https://doi.org/10.1016/0020-0190(81)
 ## Гарантии
 
 - `push`/`pop` строят новую версию, не изменяя аргумент; версии разделяют узлы.
+  Если старая версия больше не нужна, её можно изменить на месте
+  (`push_mut`/`pop_mut` в Rust, `fqueue_push_in_place`/`fqueue_pop_in_place`
+  в C): без копирования версии и освобождения старой, другие версии не
+  затрагиваются.
 - Worst-case O(1) на построение версии и доступ: не больше 3 новых узлов на
   `push` и 2 на `pop`; для обобщённого `T` — плюс не более двух `T::clone`.
 - Уничтожение версии **не** O(1) в худшем случае: освобождается всё, чем она
@@ -71,7 +75,19 @@ fqueue_destroy(&b);
 ```
 
 Получаются тип `strq` и функции `strq_init`, `strq_push`, `strq_pop`,
-`strq_front`, `strq_clone`, `strq_destroy`, итератор `strq_iter_*`.
+`strq_push_in_place`, `strq_pop_in_place`, `strq_front`, `strq_clone`,
+`strq_destroy`, итератор `strq_iter_*`.
+
+Изменение на месте — то же, что новая версия с удалением старой, но дешевле;
+при ошибке очередь не меняется:
+
+```c
+fqueue q;
+fqueue_init(&q);
+fqueue_status s = fqueue_push_in_place(&q, 1);
+int x;
+s = fqueue_pop_in_place(&q, &x);   // FQUEUE_OK, x == 1; FQUEUE_EMPTY для пустой
+```
 
 Rust:
 
@@ -82,6 +98,10 @@ let q1 = Queue::new().push(1).push(2);
 let q2 = q1.pop().unwrap();
 assert_eq!(q1.front(), Some(&1)); // старая версия не изменилась
 assert_eq!(q2.front(), Some(&2));
+
+let mut q = q2.clone();
+q.push_mut(3);                    // на месте; q2 не изменилась
+assert_eq!(q.pop_mut(), Some(2));
 ```
 
 ## Результаты (Apple M5, 4 раскладки кода × 12 раундов)
@@ -139,6 +159,7 @@ just c-install-check         # установка C-библиотеки и пр
 just rust-lint               # rustfmt + clippy::pedantic
 just rust-miri               # Rust-тесты под Miri
 just bench-compare-layouts   # сравнение C и Rust (несколько минут)
+just bench-compare-mut       # то же для операций на месте
 ```
 
 ## Происхождение

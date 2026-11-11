@@ -160,6 +160,22 @@ FQUEUE_IMPL_NODISCARD FQUEUE_API
 fqueue_status FQUEUE_IMPL_N(pop)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
                                  const FQUEUE_NAME* FQUEUE_IMPL_RESTRICT q);
 
+// In-place enqueue: append `value` to *q itself — the same as NAME_push into
+// a new version followed by NAME_destroy of *q, but without copying the
+// version and releasing the old one. Other versions sharing nodes with *q are
+// not affected. The operation itself is O(1); like NAME_destroy of the old
+// version, it may also free nodes that *q owned alone. Fails with
+// FQUEUE_NOMEM or FQUEUE_OVERFLOW, leaving *q unchanged.
+FQUEUE_IMPL_NODISCARD FQUEUE_API
+fqueue_status FQUEUE_IMPL_N(push_in_place)(FQUEUE_NAME* q, FQUEUE_T value);
+
+// In-place dequeue: remove the front element of *q itself and write it to
+// *value unless `value` is NULL; see NAME_push_in_place. Fails with
+// FQUEUE_EMPTY, FQUEUE_NOMEM or FQUEUE_OVERFLOW, leaving *q and *value
+// unchanged.
+FQUEUE_IMPL_NODISCARD FQUEUE_API
+fqueue_status FQUEUE_IMPL_N(pop_in_place)(FQUEUE_NAME* q, FQUEUE_T* value);
+
 // Iterator over the elements of a version, front to back. It owns a clone of
 // the version (which may be destroyed meanwhile) and pops it step by step, so
 // a step is worst-case O(1) like pop — and, like pop, may need to allocate:
@@ -214,12 +230,28 @@ void  FQUEUE_FREE(void *ptr);
 // reports a count above the limit, and such an operation is undone. Within
 // one operation a count grows by at most 10 (6 in copy_into, 1 in
 // start_rotation, 3 in advance), so the headroom above REFS_LIMIT keeps it
-// from wrapping before the operation is undone.
+// from wrapping before the operation is undone. In-place operations check
+// the limit up front instead (see in_place_near_limit).
 #ifndef FQUEUE_IMPL_LEN_LIMIT
 #define FQUEUE_IMPL_LEN_LIMIT UINT32_MAX
 #endif
 #ifndef FQUEUE_IMPL_REFS_LIMIT
 #define FQUEUE_IMPL_REFS_LIMIT (UINT32_MAX - 16)
+#endif
+
+// The persistent and the in-place operations share the code of a rotation
+// step; forced inlining with a constant pool argument gives the persistent
+// operations the same code as without the pool. The rare fallback of the
+// in-place operations is kept out of their way.
+#if defined(__GNUC__)
+#define FQUEUE_IMPL_ALWAYS_INLINE inline __attribute__((always_inline))
+#define FQUEUE_IMPL_COLD          __attribute__((cold, noinline))
+#elif defined(_MSC_VER)
+#define FQUEUE_IMPL_ALWAYS_INLINE __forceinline
+#define FQUEUE_IMPL_COLD          __declspec(noinline)
+#else
+#define FQUEUE_IMPL_ALWAYS_INLINE inline
+#define FQUEUE_IMPL_COLD
 #endif
 #endif // FQUEUE_IMPL_CONFIGURED
 
@@ -253,13 +285,28 @@ static void FQUEUE_IMPL_P(release)(FQUEUE_IMPL_NODE *n) {
   }
 }
 
-// Allocate a new node (refcount=1) on top of `next`. Takes over the caller's
-// reference to `next` instead of adding one, like Stack::cons in Rust.
-// Returns NULL, leaving the reference with the caller, if allocation fails.
-static FQUEUE_IMPL_NODE *FQUEUE_IMPL_P(cons)(FQUEUE_T value,
-                                             FQUEUE_IMPL_NODE *next) {
-  FQUEUE_IMPL_NODE *n = (FQUEUE_IMPL_NODE *)FQUEUE_MALLOC(sizeof *n);
-  if (!n) return NULL;
+// Nodes allocated ahead of an in-place operation, so that the operation
+// itself cannot fail. A rotation step allocates at most 3.
+typedef struct {
+  FQUEUE_IMPL_NODE *nodes[3];
+  unsigned          n;
+} FQUEUE_IMPL_P(pool);
+
+// Allocate a new node (refcount=1) on top of `next`: from `pool` if it is not
+// NULL, otherwise with FQUEUE_MALLOC. Takes over the caller's reference to
+// `next` instead of adding one, like Stack::cons in Rust. Returns NULL,
+// leaving the reference with the caller, if allocation fails.
+static FQUEUE_IMPL_ALWAYS_INLINE FQUEUE_IMPL_NODE *
+FQUEUE_IMPL_P(cons)(FQUEUE_T value, FQUEUE_IMPL_NODE *next,
+                    FQUEUE_IMPL_P(pool) *pool) {
+  FQUEUE_IMPL_NODE *n;
+  if (pool) {
+    assert(pool->n > 0);
+    n = pool->nodes[--pool->n];
+  } else {
+    n = (FQUEUE_IMPL_NODE *)FQUEUE_MALLOC(sizeof *n);
+    if (!n) return NULL;
+  }
   n->value    = value;
   n->refcount = 1;
   n->next     = next;
@@ -337,9 +384,10 @@ static FQUEUE_IMPL_NODE *FQUEUE_IMPL_P(advance)(FQUEUE_IMPL_NODE *n,
 
 // *dst = cons(value, *dst): the reference *dst held moves into the new node.
 // Returns false, leaving *dst as it was, if allocation fails.
-static bool FQUEUE_IMPL_P(cons_prepend)(FQUEUE_IMPL_NODE **dst,
-                                        FQUEUE_T value) {
-  FQUEUE_IMPL_NODE *n = FQUEUE_IMPL_P(cons)(value, *dst);
+static FQUEUE_IMPL_ALWAYS_INLINE bool
+FQUEUE_IMPL_P(cons_prepend)(FQUEUE_IMPL_NODE **dst, FQUEUE_T value,
+                            FQUEUE_IMPL_P(pool) *pool) {
+  FQUEUE_IMPL_NODE *n = FQUEUE_IMPL_P(cons)(value, *dst, pool);
   if (!n) return false;
   *dst = n;
   return true;
@@ -369,23 +417,25 @@ static void FQUEUE_IMPL_P(finish_rotation)(FQUEUE_NAME *q) {
   q->rot.tag   = FQUEUE_IMPL_IDLE;
 }
 
-// One step of the ongoing rotation. Modifies q in place (q is already a fresh
-// copy). Returns false if allocation fails; q may then be half-stepped, but
-// every field still owns its reference, so NAME_destroy undoes it. Sets
-// *overflow if a count went above REFS_LIMIT.
-static bool FQUEUE_IMPL_P(rotate_step)(FQUEUE_NAME *q, bool *overflow) {
+// One step of the ongoing rotation, taking new nodes from `pool` unless it is
+// NULL. Modifies q in place. Returns false if allocation fails; q may then be
+// half-stepped, but every field still owns its reference, so NAME_destroy
+// undoes it. Sets *overflow if a count went above REFS_LIMIT.
+static FQUEUE_IMPL_ALWAYS_INLINE bool
+FQUEUE_IMPL_P(rotate_step_from)(FQUEUE_NAME *q, bool *overflow,
+                                FQUEUE_IMPL_P(pool) *pool) {
   if (q->rot.tag == FQUEUE_IMPL_IDLE) return true;
 
   if (q->rot.tag == FQUEUE_IMPL_REVERSING) {
     if (!FQUEUE_IMPL_P(cons_prepend)(&q->rot.reversing.acc,
-                                     q->rot.reversing.old_rear->value))
+                                     q->rot.reversing.old_rear->value, pool))
       return false;
     q->rot.reversing.old_rear =
         FQUEUE_IMPL_P(advance)(q->rot.reversing.old_rear, overflow);
 
     if (q->rot.reversing.old_front != NULL) {
       if (!FQUEUE_IMPL_P(cons_prepend)(&q->rot.reversing.rfacc,
-                                       q->rot.reversing.old_front->value))
+                                       q->rot.reversing.old_front->value, pool))
         return false;
       q->rot.reversing.old_front =
           FQUEUE_IMPL_P(advance)(q->rot.reversing.old_front, overflow);
@@ -412,7 +462,7 @@ static bool FQUEUE_IMPL_P(rotate_step)(FQUEUE_NAME *q, bool *overflow) {
     return true;
   }
   if (!FQUEUE_IMPL_P(cons_prepend)(&q->rot.appending.acc,
-                                   q->rot.appending.rfacc->value))
+                                   q->rot.appending.rfacc->value, pool))
     return false;
   q->rot.appending.ok--;
   q->rot.appending.rfacc =
@@ -420,6 +470,12 @@ static bool FQUEUE_IMPL_P(rotate_step)(FQUEUE_NAME *q, bool *overflow) {
   if (q->rot.appending.rfacc == NULL || q->rot.appending.ok == 0)
     FQUEUE_IMPL_P(finish_rotation)(q);
   return true;
+}
+
+// A step of the persistent operations: q is a fresh copy, nodes come from
+// FQUEUE_MALLOC.
+static bool FQUEUE_IMPL_P(rotate_step)(FQUEUE_NAME *q, bool *overflow) {
+  return FQUEUE_IMPL_P(rotate_step_from)(q, overflow, NULL);
 }
 
 // Error exit of an operation: undo the partially built *out.
@@ -463,7 +519,7 @@ fqueue_status FQUEUE_IMPL_N(push)(FQUEUE_NAME *FQUEUE_IMPL_RESTRICT out,
   if (q->size == FQUEUE_IMPL_LEN_LIMIT) return FQUEUE_OVERFLOW;
   bool overflow = FQUEUE_IMPL_P(copy_into)(out, q);
   // The copy's reference to rear moves into the new node.
-  if (!FQUEUE_IMPL_P(cons_prepend)(&out->rear, value))
+  if (!FQUEUE_IMPL_P(cons_prepend)(&out->rear, value, NULL))
     return FQUEUE_IMPL_P(fail)(out, FQUEUE_NOMEM);
   out->rear_len++;
   out->size++;
@@ -502,6 +558,177 @@ fqueue_status FQUEUE_IMPL_N(pop)(FQUEUE_NAME *FQUEUE_IMPL_RESTRICT out,
   return FQUEUE_OK;
 }
 
+// In-place operations change *q where it is: no copy_into (a retain per
+// field) and no destroy of the old version (a release per field). To leave *q
+// unchanged on failure, everything that can fail happens before the first
+// change:
+// - the nodes the rotation step will allocate are counted from the state
+//   (step_allocs only reads it) and allocated up front into a pool;
+// - the reference limit is checked up front (in_place_near_limit).
+
+// Nodes allocated by one rotate_step_from on rotation `r`; mirrors its
+// branches without changing anything.
+static unsigned FQUEUE_IMPL_P(step_allocs)(const FQUEUE_IMPL_P(rotation) *r) {
+  switch (r->tag) {
+  case FQUEUE_IMPL_IDLE: return 0;
+  case FQUEUE_IMPL_REVERSING: {
+    bool has_front = r->reversing.old_front != NULL;
+    unsigned n = 1 + has_front;
+    if (r->reversing.old_rear->next != NULL) return n; // still reversing
+    // The same step goes on to APPENDING with the new rfacc.
+    bool has_rfacc = has_front || r->reversing.rfacc != NULL;
+    return n + (has_rfacc && r->reversing.ok != 0);
+  }
+  case FQUEUE_IMPL_APPENDING:
+    return r->appending.rfacc != NULL && r->appending.ok != 0;
+  }
+  return 0;
+}
+
+static bool FQUEUE_IMPL_P(pool_fill)(FQUEUE_IMPL_P(pool) *p, unsigned n) {
+  for (p->n = 0; p->n < n; p->n++) {
+    p->nodes[p->n] = (FQUEUE_IMPL_NODE *)FQUEUE_MALLOC(sizeof(FQUEUE_IMPL_NODE));
+    if (!p->nodes[p->n]) {
+      while (p->n > 0)
+        FQUEUE_FREE(p->nodes[--p->n]);
+      return false;
+    }
+  }
+  return true;
+}
+
+// True if a reference to n's successor could take a count above REFS_LIMIT.
+static bool FQUEUE_IMPL_P(next_near_limit)(const FQUEUE_IMPL_NODE *n) {
+  return n && n->next && n->next->refcount > FQUEUE_IMPL_REFS_LIMIT - 2;
+}
+
+// An in-place operation adds references only to the front node
+// (start_rotation in push) and to successors of nodes it advances past (front,
+// the new front in pop, and the rotation's stacks); a node gets at most two of
+// them (in pop the successor of a shared front: from advance, then from
+// start_rotation or from advancing old_front, which walks the same list). If
+// any of these nodes is within 2 of the limit, the operation goes through the
+// persistent one, which reports FQUEUE_OVERFLOW exactly. Conservative: it does
+// not check which of the references the operation will actually take.
+static bool FQUEUE_IMPL_P(in_place_near_limit)(const FQUEUE_NAME *q) {
+  const FQUEUE_IMPL_P(rotation) *r = &q->rot;
+  if ((q->front && q->front->refcount > FQUEUE_IMPL_REFS_LIMIT - 2) ||
+      FQUEUE_IMPL_P(next_near_limit)(q->front) ||
+      (q->front && FQUEUE_IMPL_P(next_near_limit)(q->front->next)) ||
+      FQUEUE_IMPL_P(next_near_limit)(q->rear))
+    return true;
+  switch (r->tag) {
+  case FQUEUE_IMPL_IDLE: return false;
+  case FQUEUE_IMPL_REVERSING:
+    return FQUEUE_IMPL_P(next_near_limit)(r->reversing.old_rear) ||
+           FQUEUE_IMPL_P(next_near_limit)(r->reversing.old_front) ||
+           FQUEUE_IMPL_P(next_near_limit)(r->reversing.rfacc);
+  case FQUEUE_IMPL_APPENDING:
+    return FQUEUE_IMPL_P(next_near_limit)(r->appending.rfacc);
+  }
+  return false;
+}
+
+static FQUEUE_IMPL_COLD fqueue_status
+FQUEUE_IMPL_P(push_in_place_slow)(FQUEUE_NAME *q, FQUEUE_T value) {
+  FQUEUE_NAME next;
+  fqueue_status s = FQUEUE_IMPL_N(push)(&next, q, value);
+  if (s != FQUEUE_OK) return s;
+  FQUEUE_IMPL_N(destroy)(q);
+  *q = next;
+  return FQUEUE_OK;
+}
+
+static FQUEUE_IMPL_COLD fqueue_status
+FQUEUE_IMPL_P(pop_in_place_slow)(FQUEUE_NAME *q, FQUEUE_T *value) {
+  FQUEUE_T    front = q->front->value;
+  FQUEUE_NAME next;
+  fqueue_status s = FQUEUE_IMPL_N(pop)(&next, q);
+  if (s != FQUEUE_OK) return s;
+  FQUEUE_IMPL_N(destroy)(q);
+  *q = next;
+  if (value) *value = front;
+  return FQUEUE_OK;
+}
+
+fqueue_status FQUEUE_IMPL_N(push_in_place)(FQUEUE_NAME *q, FQUEUE_T value) {
+  if (q->size == FQUEUE_IMPL_LEN_LIMIT) return FQUEUE_OVERFLOW;
+  if (FQUEUE_IMPL_P(in_place_near_limit)(q))
+    return FQUEUE_IMPL_P(push_in_place_slow)(q, value);
+  FQUEUE_IMPL_NODE *rear = FQUEUE_IMPL_P(cons)(value, q->rear, NULL);
+  if (!rear) return FQUEUE_NOMEM;
+  // The rotation as the step will see it: as in NAME_push.
+  bool start = q->rot.tag == FQUEUE_IMPL_IDLE && q->rear_len + 1 > q->front_len;
+  FQUEUE_IMPL_P(rotation) r = q->rot;
+  if (start)
+    r = (FQUEUE_IMPL_P(rotation)){
+        .tag       = FQUEUE_IMPL_REVERSING,
+        .reversing = {.old_front = q->front,
+                      .old_rear  = rear,
+                      .ok        = q->front_len}};
+  FQUEUE_IMPL_P(pool) pool;
+  if (!FQUEUE_IMPL_P(pool_fill)(&pool, FQUEUE_IMPL_P(step_allocs)(&r))) {
+    FQUEUE_FREE(rear); // the reference to q->rear stays with q
+    return FQUEUE_NOMEM;
+  }
+
+  // From here on nothing fails.
+  bool overflow = false;
+  q->rear = rear;
+  q->rear_len++;
+  q->size++;
+  if (start) overflow |= FQUEUE_IMPL_P(start_rotation)(q);
+  (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, &pool);
+  assert(!overflow && pool.n == 0);
+  (void)overflow;
+  return FQUEUE_OK;
+}
+
+fqueue_status FQUEUE_IMPL_N(pop_in_place)(FQUEUE_NAME *q, FQUEUE_T *value) {
+  if (q->size == 0) return FQUEUE_EMPTY;
+  if (FQUEUE_IMPL_P(in_place_near_limit)(q))
+    return FQUEUE_IMPL_P(pop_in_place_slow)(q, value);
+  // The rotation as the step will see it: as in NAME_pop.
+  FQUEUE_IMPL_NODE       *front = q->front; // not NULL in a non-empty queue
+  bool                    start = false;
+  FQUEUE_IMPL_P(rotation) r     = q->rot;
+  if (r.tag == FQUEUE_IMPL_REVERSING) {
+    r.reversing.ok--;
+  } else if (r.tag == FQUEUE_IMPL_APPENDING) {
+    r.appending.ok--;
+  } else if (q->rear_len > q->front_len - 1) {
+    start = true;
+    r     = (FQUEUE_IMPL_P(rotation)){
+            .tag       = FQUEUE_IMPL_REVERSING,
+            .reversing = {.old_front = front->next,
+                          .old_rear  = q->rear,
+                          .ok        = q->front_len - 1}};
+  }
+  FQUEUE_IMPL_P(pool) pool;
+  if (!FQUEUE_IMPL_P(pool_fill)(&pool, FQUEUE_IMPL_P(step_allocs)(&r)))
+    return FQUEUE_NOMEM;
+
+  // From here on nothing fails.
+  if (value) *value = front->value;
+  bool overflow = false;
+  q->front = FQUEUE_IMPL_P(advance)(front, &overflow);
+  q->front_len--;
+  q->size--;
+  if (q->rot.tag == FQUEUE_IMPL_REVERSING) {
+    assert(q->rot.reversing.ok > 0);
+    q->rot.reversing.ok--;
+  } else if (q->rot.tag == FQUEUE_IMPL_APPENDING) {
+    assert(q->rot.appending.ok > 0);
+    q->rot.appending.ok--;
+  } else if (start) {
+    overflow |= FQUEUE_IMPL_P(start_rotation)(q);
+  }
+  (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, &pool);
+  assert(!overflow && pool.n == 0);
+  (void)overflow;
+  return FQUEUE_OK;
+}
+
 bool FQUEUE_IMPL_N(front)(const FQUEUE_NAME *q, FQUEUE_T *value) {
   if (!q->front) return false;
   *value = q->front->value;
@@ -515,15 +742,7 @@ fqueue_status FQUEUE_IMPL_N(iter_init)(FQUEUE_IMPL_N(iter) *it,
 
 fqueue_status FQUEUE_IMPL_N(iter_next)(FQUEUE_IMPL_N(iter) *it,
                                        FQUEUE_T *value) {
-  FQUEUE_T    front;
-  FQUEUE_NAME next;
-  if (!FQUEUE_IMPL_N(front)(&it->rest, &front)) return FQUEUE_EMPTY;
-  fqueue_status s = FQUEUE_IMPL_N(pop)(&next, &it->rest);
-  if (s != FQUEUE_OK) return s;
-  FQUEUE_IMPL_N(destroy)(&it->rest);
-  it->rest = next;
-  *value   = front;
-  return FQUEUE_OK;
+  return FQUEUE_IMPL_N(pop_in_place)(&it->rest, value);
 }
 
 void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter) *it) {

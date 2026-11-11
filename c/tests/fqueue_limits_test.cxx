@@ -67,12 +67,59 @@ static fqueue_status do_pop(fqueue *out, const fqueue *q) {
   return fqueue_pop(out, q);
 }
 
+// The same for an in-place operation on *q: every injected failure must leave
+// *q as `expected`. Returns the number of failures; *q is then changed.
+template <class Op>
+static long in_place_under_oom(Op op, fqueue *q,
+                               const std::vector<int> &expected) {
+  for (long k = 0;; ++k) {
+    long before = live;
+    arm(k);
+    fqueue_status s = op(q);
+    disarm();
+    if (!injected) {
+      REQUIRE(s == FQUEUE_OK);
+      return k;
+    }
+    REQUIRE(s == FQUEUE_NOMEM);
+    REQUIRE(live == before);
+    REQUIRE(contents(q) == expected);
+  }
+}
+
+static fqueue_status do_pop_in_place(fqueue *q) {
+  int v = -1;
+  fqueue_status s = fqueue_pop_in_place(q, &v);
+  if (s != FQUEUE_OK) REQUIRE(v == -1);
+  return s;
+}
+
+// In-place push and pop under OOM on a clone of q, which shares its nodes.
+static long in_place_oom_on_clone(const fqueue *q, std::deque<int> model,
+                                  int value) {
+  std::vector<int> expected(model.begin(), model.end());
+  fqueue c;
+  REQUIRE(fqueue_clone(&c, q) == FQUEUE_OK);
+  long failures = in_place_under_oom(
+      [&](fqueue *p) { return fqueue_push_in_place(p, value); }, &c, expected);
+  expected.push_back(value);
+  REQUIRE(contents(&c) == expected);
+  failures += in_place_under_oom(do_pop_in_place, &c, expected);
+  expected.erase(expected.begin());
+  REQUIRE(contents(&c) == expected);
+  fqueue_destroy(&c);
+  REQUIRE(contents(q) == std::vector<int>(model.begin(), model.end()));
+  return failures;
+}
+
 // Every push/pop history up to `depth` operations, with every allocation of
 // every operation failed once before it is allowed to succeed.
 static void explore_oom(const fqueue *q, std::deque<int> &model, int depth,
                         long &failures) {
   std::vector<int> expected(model.begin(), model.end());
   REQUIRE(contents(q) == expected);
+  if (model.size() < TEST_LEN_LIMIT)
+    failures += in_place_oom_on_clone(q, model, -depth);
   if (depth == 0) return;
 
   fqueue child;
@@ -145,6 +192,43 @@ TEST_CASE("out of memory in any allocation along a long history", "[limits]") {
   REQUIRE(live == start);
 }
 
+TEST_CASE("out of memory in any allocation of in-place operations on a version "
+          "owned alone",
+          "[limits]") {
+  // Push two, pop one up to the length limit, then drain, all in place: no
+  // other version shares the nodes.
+  long start = live;
+  {
+    fqueue q;
+    fqueue_init(&q);
+    std::deque<int> model;
+    long failures = 0;
+    int k = 0;
+    auto push = [&] {
+      std::vector<int> expected(model.begin(), model.end());
+      failures += in_place_under_oom(
+          [&](fqueue *p) { return fqueue_push_in_place(p, k); }, &q, expected);
+      model.push_back(k++);
+    };
+    auto pop = [&] {
+      std::vector<int> expected(model.begin(), model.end());
+      failures += in_place_under_oom(do_pop_in_place, &q, expected);
+      model.pop_front();
+    };
+    while (model.size() + 2 <= TEST_LEN_LIMIT) {
+      push();
+      push();
+      pop();
+    }
+    while (!model.empty())
+      pop();
+    REQUIRE(contents(&q).empty());
+    REQUIRE(failures > 50);
+    fqueue_destroy(&q);
+  }
+  REQUIRE(live == start);
+}
+
 TEST_CASE("pushing past the length limit reports FQUEUE_OVERFLOW",
           "[limits]") {
   long start = live;
@@ -157,6 +241,11 @@ TEST_CASE("pushing past the length limit reports FQUEUE_OVERFLOW",
     fqueue out;
     REQUIRE(fqueue_push(&out, q.get(), -1) == FQUEUE_OVERFLOW);
     REQUIRE(contents(q) == expected);
+    fqueue c;
+    REQUIRE(fqueue_clone(&c, q.get()) == FQUEUE_OK);
+    REQUIRE(fqueue_push_in_place(&c, -1) == FQUEUE_OVERFLOW);
+    REQUIRE(contents(&c) == expected);
+    fqueue_destroy(&c);
 
     Q popped = *q.pop(); // there is room again
     REQUIRE(popped.push(-1).size() == TEST_LEN_LIMIT);
@@ -193,6 +282,12 @@ TEST_CASE("too many references to a node report FQUEUE_OVERFLOW", "[limits]") {
     fqueue out;
     REQUIRE(fqueue_push(&out, q.get(), -1) == FQUEUE_OVERFLOW);
     REQUIRE(fqueue_pop(&out, q.get()) == FQUEUE_OVERFLOW);
+    // In place on one of the clones: its nodes are just as saturated.
+    int v = -1;
+    REQUIRE(fqueue_push_in_place(&clones.back(), -1) == FQUEUE_OVERFLOW);
+    REQUIRE(fqueue_pop_in_place(&clones.back(), &v) == FQUEUE_OVERFLOW);
+    REQUIRE(v == -1);
+    REQUIRE(fqueue_size(&clones.back()) == expected.size());
     REQUIRE(live == saturated);
 
     // Destroying some clones makes room again; all versions are intact.
@@ -224,7 +319,7 @@ TEST_CASE("random operations on many shared versions never overflow",
     fqueue_init(&versions[0]);
     std::vector<std::deque<int>> models{{}};
     uint64_t x = 0x2545F4914F6CDD1Du;
-    long overflows = 0;
+    long overflows = 0, in_place_overflows = 0;
     for (int k = 0; k < 20000; ++k) {
       x ^= x << 13;
       x ^= x >> 7;
@@ -236,6 +331,32 @@ TEST_CASE("random operations on many shared versions never overflow",
       std::deque<int> model = models[i];
       fqueue out;
       fqueue_status s;
+      if ((x >> 20) % 5 == 0) {
+        // In place: versions[j] itself changes. j is drawn from the whole
+        // history, so that the hot first versions keep their nodes.
+        size_t j = (x >> 24) % versions.size();
+        int v = -1;
+        bool pop = (x >> 40) & 1;
+        s = pop ? fqueue_pop_in_place(&versions[j], &v)
+                : fqueue_push_in_place(&versions[j], k);
+        if (s == FQUEUE_OVERFLOW) {
+          ++in_place_overflows;
+        } else if (s == FQUEUE_EMPTY) {
+          REQUIRE(models[j].empty());
+        } else {
+          REQUIRE(s == FQUEUE_OK);
+          if (pop) {
+            REQUIRE(v == models[j].front());
+            models[j].pop_front();
+          } else {
+            models[j].push_back(k);
+          }
+        }
+        REQUIRE(fqueue_size(&versions[j]) == models[j].size());
+        if (!models[j].empty())
+          REQUIRE(front_of(&versions[j]) == models[j].front());
+        continue;
+      }
       switch ((x >> 40) % 8) {
       case 0: // destroy (keep at least one version)
         if (versions.size() > 1) {
@@ -273,6 +394,7 @@ TEST_CASE("random operations on many shared versions never overflow",
       models.push_back(std::move(model));
     }
     REQUIRE(overflows > 100);
+    REQUIRE(in_place_overflows > 0);
     for (fqueue &v : versions)
       fqueue_destroy(&v);
   }
