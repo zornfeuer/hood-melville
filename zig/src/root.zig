@@ -194,8 +194,10 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             self.* = undefined;
         }
 
+        // inline: без него push/pop материализуют на стеке копии аргумента и
+        // результата clone (кадр 288 байт против 160); persistent −9%.
         /// Приобрести ссылки на узлы для независимой версии за O(1).
-        pub fn clone(self: Self) Error!Self {
+        pub inline fn clone(self: Self) Error!Self {
             // Поэтапное приобретение ссылок позволяет откатить даже алиасы
             // между полями, не оставляя временного переполнения счётчика.
             var nodes: [6]?*Node = .{ self.front_stack, self.rear, null, null, null, null };
@@ -365,12 +367,19 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
                 .{ .reversing = .{ .old_front = self.front_stack, .old_rear = null } }
             else
                 self.rot;
-            var pool = try Pool.init(allocator, 1 + stepAllocs(rotation, self.ok));
+            // Как в C: тыл выделяется первым, пул — только шаг ротации. Порядок
+            // выделений задаёт порядок адресов узлов в списках: с тылом из
+            // пула (последним выделенным) mixed_mut 10^7 был вдвое медленнее.
+            // При отказе пула ссылка на прежний тыл остаётся у очереди.
+            const rear = try allocator.create(Node);
+            errdefer allocator.destroy(rear);
+            var pool = try Pool.init(allocator, stepAllocs(rotation, self.ok));
             defer pool.deinit(allocator);
 
             // После подготовки пула ошибок нет. В atomic режиме инкременты
             // неотказывающие: предпроверка предела не защищает от гонок.
-            prepend(allocator, &self.rear, value, &pool) catch unreachable;
+            rear.* = .{ .value = value, .next = self.rear };
+            self.rear = rear;
             self.size += 1;
             self.rear_len += 1;
             if (starting) self.start(options.atomic) catch unreachable;
