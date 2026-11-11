@@ -17,6 +17,7 @@ Processing Letters*, 1981, 13(2), 50–54](https://doi.org/10.1016/0020-0190(81)
 |---|---|
 | `c/` | библиотека на C17: шаблон `include/fqueue_template.h` для любого типа элемента, экземпляр для `int` (`include/fqueue.h`, `src/fqueue.c`), тесты на Catch2, нагрузка для бенчмарков |
 | `rust/` | крейт `hood-melville`; `unsafe` только в `src/node.rs` (свой счётчик ссылок в узле), проверяется Miri |
+| `zig/` | третья реализация на Zig 0.16 (идиоматичная, ещё не оптимизированная): `Queue(T)` с явным аллокатором и ошибками через error union, тесты с проверкой утечек и отказа каждой аллокации, та же нагрузка |
 | `bench/compare.py` | сравнение бинарников: чередование запусков, режимы аллокатора, несколько раскладок кода, бутстреп-интервалы |
 | `docs/proof.md` | доказательство корректности и worst-case O(1) при одном шаге ротации на операцию |
 | `docs/benchmarks.md` | методика измерений, журнал оптимизаций (что принято и что отклонено), результаты |
@@ -158,6 +159,8 @@ just c-leaks                 # C-тесты под leaks (macOS)
 just c-install-check         # установка C-библиотеки и пример через find_package
 just rust-lint               # rustfmt + clippy::pedantic
 just rust-miri               # Rust-тесты под Miri
+just zig-test                # Zig-тесты (zig build test)
+just zig-lint                # zig fmt --check
 just bench-compare-layouts   # сравнение C и Rust (несколько минут)
 just bench-compare-mut       # то же для операций на месте
 ```

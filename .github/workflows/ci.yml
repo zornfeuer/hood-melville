@@ -65,3 +65,17 @@ jobs:
       - run: cargo miri test --lib
         env:
           MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-strict-provenance
+
+  zig:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: zig
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig fmt --check .
+      - run: zig build test
+      - run: zig build -Doptimize=ReleaseFast

@@ -1,3 +1,6 @@
 build/
 bench-results/
 rust/target/
+zig/.zig-cache/
+zig/.zig-cache-global/
+zig/zig-out/
