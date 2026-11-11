@@ -114,9 +114,11 @@ bench-compare-layouts rounds="8": (bench-layouts "cur")
     #!/usr/bin/env bash
     set -euo pipefail
     bins=()
-    for impl in C Rust Zig; do
+    for impl in C Rust; do
         for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
     done
+    # У Zig одна сборка на все раскладки — прогонять её четырежды незачем.
+    bins+=("Zig/al64=build/bench-layout/cur/Zig-al64")
     python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-layouts \
         {{bench_cases}} "${bins[@]}"
 
@@ -125,9 +127,11 @@ bench-compare-mut rounds="8": (bench-layouts "cur")
     #!/usr/bin/env bash
     set -euo pipefail
     bins=()
-    for impl in C Rust Zig; do
+    for impl in C Rust; do
         for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
     done
+    # У Zig одна сборка на все раскладки — прогонять её четырежды незачем.
+    bins+=("Zig/al64=build/bench-layout/cur/Zig-al64")
     python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-mut \
         {{bench_cases_mut}} "${bins[@]}"
 
