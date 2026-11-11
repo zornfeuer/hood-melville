@@ -1,0 +1,118 @@
+--- include/fqueue_template.h
++++ include/fqueue_template.h
+@@ -513,18 +513,30 @@
+   if (q->rot.tag == FQUEUE_IMPL_IDLE) return true;
+ 
+   if (q->rot.tag == FQUEUE_IMPL_REVERSING) {
++#ifdef FQ_FREE_FIRST
++    { FQUEUE_T v = q->rot.reversing.old_rear->value;
++      q->rot.reversing.old_rear = FQUEUE_IMPL_P(advance)(q->rot.reversing.old_rear, overflow);
++      if (!FQUEUE_IMPL_P(cons_prepend)(&q->rot.reversing.acc, v, pool)) abort(); }
++#else
+     if (!FQUEUE_IMPL_P(cons_prepend)(&q->rot.reversing.acc,
+                                      q->rot.reversing.old_rear->value, pool))
+       return false;
+     q->rot.reversing.old_rear =
+         FQUEUE_IMPL_P(advance)(q->rot.reversing.old_rear, overflow);
++#endif
+ 
+     if (q->rot.reversing.old_front != NULL) {
++#ifdef FQ_FREE_FIRST
++      FQUEUE_T v = q->rot.reversing.old_front->value;
++      q->rot.reversing.old_front = FQUEUE_IMPL_P(advance)(q->rot.reversing.old_front, overflow);
++      if (!FQUEUE_IMPL_P(cons_prepend)(&q->rot.reversing.rfacc, v, pool)) abort();
++#else
+       if (!FQUEUE_IMPL_P(cons_prepend)(&q->rot.reversing.rfacc,
+                                        q->rot.reversing.old_front->value, pool))
+         return false;
+       q->rot.reversing.old_front =
+           FQUEUE_IMPL_P(advance)(q->rot.reversing.old_front, overflow);
++#endif
+     }
+ 
+     if (q->rot.reversing.old_rear != NULL) return true;
+@@ -547,12 +559,19 @@
+     FQUEUE_IMPL_P(finish_rotation)(q);
+     return true;
+   }
++#ifdef FQ_FREE_FIRST
++  { FQUEUE_T v = q->rot.appending.rfacc->value;
++    q->rot.appending.rfacc = FQUEUE_IMPL_P(advance)(q->rot.appending.rfacc, overflow);
++    if (!FQUEUE_IMPL_P(cons_prepend)(&q->rot.appending.acc, v, pool)) abort(); }
++  q->rot.appending.ok--;
++#else
+   if (!FQUEUE_IMPL_P(cons_prepend)(&q->rot.appending.acc,
+                                    q->rot.appending.rfacc->value, pool))
+     return false;
+   q->rot.appending.ok--;
+   q->rot.appending.rfacc =
+       FQUEUE_IMPL_P(advance)(q->rot.appending.rfacc, overflow);
++#endif
+   if (q->rot.appending.rfacc == NULL || q->rot.appending.ok == 0)
+     FQUEUE_IMPL_P(finish_rotation)(q);
+   return true;
+@@ -672,6 +691,9 @@
+ }
+ 
+ static bool FQUEUE_IMPL_P(pool_fill)(FQUEUE_IMPL_P(pool) *p, unsigned n) {
++#ifdef FQ_NOPOOL
++  n = 0;
++#endif
+   for (p->n = 0; p->n < n; p->n++) {
+     p->nodes[p->n] = (FQUEUE_IMPL_NODE *)FQUEUE_MALLOC(sizeof(FQUEUE_IMPL_NODE));
+     if (!p->nodes[p->n]) {
+@@ -680,6 +702,11 @@
+       return false;
+     }
+   }
++#ifdef FQ_POOL_FIFO
++  for (unsigned i = 0; i < p->n / 2; i++) {
++    FQUEUE_IMPL_NODE *t = p->nodes[i]; p->nodes[i] = p->nodes[p->n - 1 - i]; p->nodes[p->n - 1 - i] = t;
++  }
++#endif
+   return true;
+ }
+ 
+@@ -764,7 +791,11 @@
+   q->rear_len++;
+   q->size++;
+   if (start) overflow |= FQUEUE_IMPL_P(start_rotation)(q);
++  #ifdef FQ_NOPOOL
++  (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, NULL);
++#else
+   (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, &pool);
++#endif
+ #ifndef FQUEUE_ATOMIC
+   assert(!overflow); // with FQUEUE_ATOMIC the limit is soft (see Threads)
+ #endif
+@@ -794,13 +825,18 @@
+                           .ok        = q->front_len - 1}};
+   }
+   FQUEUE_IMPL_P(pool) pool;
++#ifndef FQ_POOL_LATE
+   if (!FQUEUE_IMPL_P(pool_fill)(&pool, FQUEUE_IMPL_P(step_allocs)(&r)))
+     return FQUEUE_NOMEM;
++#endif
+ 
+   // From here on nothing fails.
+   if (value) *value = front->value;
+   bool overflow = false;
+   q->front = FQUEUE_IMPL_P(advance)(front, &overflow);
++#ifdef FQ_POOL_LATE
++  if (!FQUEUE_IMPL_P(pool_fill)(&pool, FQUEUE_IMPL_P(step_allocs)(&r))) abort();
++#endif
+   q->front_len--;
+   q->size--;
+   if (q->rot.tag == FQUEUE_IMPL_REVERSING) {
+@@ -812,7 +848,11 @@
+   } else if (start) {
+     overflow |= FQUEUE_IMPL_P(start_rotation)(q);
+   }
++  #ifdef FQ_NOPOOL
++  (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, NULL);
++#else
+   (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, &pool);
++#endif
+ #ifndef FQUEUE_ATOMIC
+   assert(!overflow); // with FQUEUE_ATOMIC the limit is soft (see Threads)
+ #endif
