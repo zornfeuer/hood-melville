@@ -42,20 +42,23 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
 
         /// Ошибки выделения памяти и переполнения длины или ссылок.
         pub const Error = Allocator.Error || error{Overflow};
-        const Reversing = struct {
-            old_front: ?*Node,
-            old_rear: ?*Node,
+        // Фаза ротации кодируется самими указателями, без тега (как ниша в
+        // Rust): разворот идёт, пока непуст old_rear; дописывание — old_rear
+        // исчерпан, acc непуст (в нём уже есть тыл); покой — все пусты. Вне
+        // своей фазы поля пусты, поэтому deinit/clone обходят их без разбора.
+        // Версия — 64 байта, одна строка кэша (с тегом было 72).
+        const Rotation = struct {
+            old_front: ?*Node = null,
+            old_rear: ?*Node = null,
             rfront: ?*Node = null,
             acc: ?*Node = null,
-        };
-        const Appending = struct {
-            rfront: ?*Node,
-            acc: ?*Node,
-        };
-        const Rotation = union(enum) {
-            idle,
-            reversing: Reversing,
-            appending: Appending,
+
+            const Phase = enum { idle, reversing, appending };
+
+            fn phase(r: Rotation) Phase {
+                if (r.old_rear != null) return .reversing;
+                return if (r.acc != null) .appending else .idle;
+            }
         };
         size: u32 = 0,
         front_len: u32 = 0,
@@ -63,7 +66,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
         ok: u32 = 0,
         front_stack: ?*Node = null,
         rear: ?*Node = null,
-        rot: Rotation = .idle,
+        rot: Rotation = .{},
 
         /// Создать пустую очередь без выделения памяти.
         pub fn init() Self {
@@ -178,19 +181,10 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
         pub fn deinit(self: *Self, allocator: Allocator) void {
             release(allocator, self.front_stack);
             release(allocator, self.rear);
-            switch (self.rot) {
-                .idle => {},
-                .reversing => |s| {
-                    release(allocator, s.old_front);
-                    release(allocator, s.old_rear);
-                    release(allocator, s.rfront);
-                    release(allocator, s.acc);
-                },
-                .appending => |s| {
-                    release(allocator, s.rfront);
-                    release(allocator, s.acc);
-                },
-            }
+            release(allocator, self.rot.old_front);
+            release(allocator, self.rot.old_rear);
+            release(allocator, self.rot.rfront);
+            release(allocator, self.rot.acc);
             self.* = undefined;
         }
 
@@ -200,17 +194,8 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
         pub inline fn clone(self: Self) Error!Self {
             // Поэтапное приобретение ссылок позволяет откатить даже алиасы
             // между полями, не оставляя временного переполнения счётчика.
-            var nodes: [6]?*Node = .{ self.front_stack, self.rear, null, null, null, null };
-            switch (self.rot) {
-                .idle => {},
-                .reversing => |s| {
-                    nodes[2..6].* = .{ s.old_front, s.old_rear, s.rfront, s.acc };
-                },
-                .appending => |s| {
-                    nodes[2] = s.rfront;
-                    nodes[3] = s.acc;
-                },
-            }
+            const r = self.rot;
+            const nodes = [6]?*Node{ self.front_stack, self.rear, r.old_front, r.old_rear, r.rfront, r.acc };
             var acquired: usize = 0;
             errdefer for (nodes[0..acquired]) |n| {
                 if (n) |p| {
@@ -226,40 +211,42 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
 
         fn start(self: *Self, comptime unchecked: bool) Error!void {
             try retainMode(self.front_stack, unchecked);
-            self.rot = .{ .reversing = .{ .old_front = self.front_stack, .old_rear = self.rear } };
+            std.debug.assert(self.rear != null);
+            self.rot = .{ .old_front = self.front_stack, .old_rear = self.rear };
             self.ok = self.front_len;
             self.rear = null;
             self.rear_len = 0;
         }
 
         fn finish(self: *Self, allocator: Allocator) void {
-            const s = self.rot.appending;
+            const s = self.rot;
+            std.debug.assert(s.phase() == .appending);
             release(allocator, self.front_stack);
             release(allocator, s.rfront);
             self.front_stack = s.acc;
             self.front_len = self.size - self.rear_len;
-            self.rot = .idle;
+            self.rot = .{};
             self.ok = 0;
         }
 
         fn step(self: *Self, allocator: Allocator, pool: ?*Pool, comptime unchecked: bool) Error!void {
-            switch (self.rot) {
+            const s = &self.rot;
+            switch (s.phase()) {
                 .idle => {},
-                .reversing => |*s| {
+                .reversing => {
                     try prepend(allocator, &s.acc, s.old_rear.?.value, pool);
                     try advanceMode(allocator, &s.old_rear, unchecked);
                     if (s.old_front) |n| {
                         try prepend(allocator, &s.rfront, n.value, pool);
                         try advanceMode(allocator, &s.old_front, unchecked);
                     }
+                    // Исчерпанный old_rear сам переводит фазу в дописывание.
                     if (s.old_rear == null) {
                         std.debug.assert(s.old_front == null);
-                        const next: Appending = .{ .rfront = s.rfront, .acc = s.acc };
-                        self.rot = .{ .appending = next };
                         if (self.ok == 0) self.finish(allocator);
                     }
                 },
-                .appending => |*s| {
+                .appending => {
                     try prepend(allocator, &s.acc, s.rfront.?.value, pool);
                     try advanceMode(allocator, &s.rfront, unchecked);
                     self.ok -= 1;
@@ -276,7 +263,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             try prepend(allocator, &q.rear, value, null);
             q.size += 1;
             q.rear_len += 1;
-            if (q.rot == .idle and q.rear_len > q.front_len) try q.start(false);
+            if (q.rot.phase() == .idle and q.rear_len > q.front_len) try q.start(false);
             try q.step(allocator, null, false);
             return q;
         }
@@ -289,9 +276,10 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             try advance(allocator, &q.front_stack);
             q.size -= 1;
             q.front_len -= 1;
-            if (q.rot != .idle) {
+            const phase = q.rot.phase();
+            if (phase != .idle) {
                 q.ok -= 1;
-                if (q.rot == .appending and q.ok == 0) q.finish(allocator);
+                if (phase == .appending and q.ok == 0) q.finish(allocator);
             } else if (q.rear_len > q.front_len) try q.start(false);
             try q.step(allocator, null, false);
             return q;
@@ -323,10 +311,11 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
         };
 
         // Ровно один шаг модели Rust: переход Reversing не переносит rfront.
-        fn stepAllocs(rotation: Rotation, ok: u32) usize {
-            return switch (rotation) {
+        // phase передаётся явно: при начале ротации old_rear ещё не известен.
+        fn stepAllocs(phase: Rotation.Phase, old_front: ?*Node, ok: u32) usize {
+            return switch (phase) {
                 .idle => 0,
-                .reversing => |s| 1 + @as(usize, @intFromBool(s.old_front != null)),
+                .reversing => 1 + @as(usize, @intFromBool(old_front != null)),
                 .appending => @intFromBool(ok != 0),
             };
         }
@@ -345,11 +334,9 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
                 if (refCount(n, .monotonic) > options.refs_limit - 2 or nextNearLimit(n) or nextNearLimit(n.next)) return true;
             }
             if (nextNearLimit(self.rear)) return true;
-            return switch (self.rot) {
-                .idle => false,
-                .reversing => |s| nextNearLimit(s.old_front) or nextNearLimit(s.old_rear) or nextNearLimit(s.rfront),
-                .appending => |s| nextNearLimit(s.rfront),
-            };
+            // Вне своей фазы поля пусты: проверка не зависит от фазы.
+            const s = self.rot;
+            return nextNearLimit(s.old_front) or nextNearLimit(s.old_rear) or nextNearLimit(s.rfront);
         }
 
         /// Добавить на месте. Все возможные ошибки проверяются до изменения;
@@ -362,18 +349,16 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
                 self.* = next;
                 return;
             }
-            const starting = self.rot == .idle and self.rear_len + 1 > self.front_len;
-            const rotation: Rotation = if (starting)
-                .{ .reversing = .{ .old_front = self.front_stack, .old_rear = null } }
-            else
-                self.rot;
+            const phase = self.rot.phase();
+            const starting = phase == .idle and self.rear_len + 1 > self.front_len;
             // Как в C: тыл выделяется первым, пул — только шаг ротации. Порядок
             // выделений задаёт порядок адресов узлов в списках: с тылом из
             // пула (последним выделенным) mixed_mut 10^7 был вдвое медленнее.
             // При отказе пула ссылка на прежний тыл остаётся у очереди.
             const rear = try allocator.create(Node);
             errdefer allocator.destroy(rear);
-            var pool = try Pool.init(allocator, stepAllocs(rotation, self.ok));
+            const old_front = if (starting) self.front_stack else self.rot.old_front;
+            var pool = try Pool.init(allocator, stepAllocs(if (starting) .reversing else phase, old_front, self.ok));
             defer pool.deinit(allocator);
 
             // После подготовки пула ошибок нет. В atomic режиме инкременты
@@ -397,21 +382,19 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
                 self.* = next;
                 return value;
             }
-            const starting = self.rot == .idle and self.rear_len > self.front_len - 1;
-            const rotation: Rotation = if (starting)
-                .{ .reversing = .{ .old_front = self.front_stack.?.next, .old_rear = self.rear } }
-            else
-                self.rot;
-            const ok = if (self.rot == .idle) self.front_len - 1 else self.ok - 1;
-            var pool = try Pool.init(allocator, stepAllocs(rotation, ok));
+            const phase = self.rot.phase();
+            const starting = phase == .idle and self.rear_len > self.front_len - 1;
+            const old_front = if (starting) self.front_stack.?.next else self.rot.old_front;
+            const ok = if (phase == .idle) self.front_len - 1 else self.ok - 1;
+            var pool = try Pool.init(allocator, stepAllocs(if (starting) .reversing else phase, old_front, ok));
             defer pool.deinit(allocator);
 
             advanceMode(allocator, &self.front_stack, options.atomic) catch unreachable;
             self.size -= 1;
             self.front_len -= 1;
-            if (self.rot != .idle) {
+            if (phase != .idle) {
                 self.ok -= 1;
-                if (self.rot == .appending and self.ok == 0) self.finish(allocator);
+                if (phase == .appending and self.ok == 0) self.finish(allocator);
             } else if (starting) self.start(options.atomic) catch unreachable;
             self.step(allocator, &pool, options.atomic) catch unreachable;
             std.debug.assert(pool.count == 0);
@@ -452,7 +435,7 @@ fn InternalSuite(comptime atomic: bool) type {
             const Q = QueueWithOptions(i32, .{ .atomic = atomic, .refs_limit = limit });
             const a = std.testing.allocator;
             try std.testing.expectEqual(@as(usize, 16), @sizeOf(Q.Node));
-            try std.testing.expectEqual(@as(usize, 72), @sizeOf(Q));
+            try std.testing.expectEqual(@as(usize, 64), @sizeOf(Q));
             var head: ?*Q.Node = null;
             defer Q.release(a, head);
             try Q.prepend(a, &head, 1, null);
