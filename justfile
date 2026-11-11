@@ -175,6 +175,31 @@ bench-compare-mut rounds="8": (bench-layouts "cur")
     python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-mut \
         {{bench_cases_mut}} "${bins[@]}"
 
+# --- Параллельная нагрузка (#6) -----------------------------------------------
+
+# Сборки fqueue_par: build/par/{C,Rust,Zig}. Режим pool в C — OpenMP из
+# libomp (brew install libomp); без него C собирается только с режимом threads.
+bench-par-build: zig-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p build/par
+    omp=()
+    if prefix=$(brew --prefix libomp 2>/dev/null) && [ -f "$prefix/include/omp.h" ]; then
+        omp=(-Xclang -fopenmp -I"$prefix/include" -L"$prefix/lib" -lomp)
+    else
+        echo "libomp не найден: C без режима pool (brew install libomp)" >&2
+    fi
+    cc -O3 -march=native -flto -DNDEBUG -Ic/include ${omp[@]+"${omp[@]}"} \
+        c/bench/fqueue_par.c c/src/fqueue.c -o build/par/C
+    (cd rust && RUSTFLAGS="-C target-cpu=native" cargo build -q --profile max --example fqueue_par)
+    cp rust/target/max/examples/fqueue_par build/par/Rust
+    cp zig/zig-out/bin/fqueue_par build/par/Zig
+
+# Масштабирование по числу потоков и доле операций над общими версиями.
+bench-par rounds="5" modes="pool,threads": bench-par-build
+    python3 -I bench/parallel.py --settle 60 --rounds {{rounds}} --modes {{modes}} \
+        --out bench-results/parallel C=build/par/C Rust=build/par/Rust Zig=build/par/Zig
+
 # A/B двух наборов раскладок одной реализации (собранных bench-layouts <label>):
 # just bench-ab-layouts ctl exp Rust [rounds].
 bench-ab-layouts a b impl rounds="8":

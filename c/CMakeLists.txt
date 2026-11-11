@@ -108,4 +108,17 @@ if(HOOD_MELVILLE_BUILD_BENCH)
     target_compile_definitions(fqueue_bench_sync PRIVATE FQUEUE_BENCH_SYNC)
     target_compile_options(fqueue_bench_sync PRIVATE -O3 -march=native -flto -DNDEBUG)
     target_link_options(fqueue_bench_sync PRIVATE -flto)
+    # Параллельная нагрузка (#6): режим threads — pthreads, режим pool —
+    # OpenMP, если он найден (на macOS: brew install libomp и
+    # -DOpenMP_ROOT=$(brew --prefix libomp)).
+    find_package(Threads REQUIRED)
+    find_package(OpenMP COMPONENTS C)
+    add_executable(fqueue_par bench/fqueue_par.c src/fqueue.c)
+    target_include_directories(fqueue_par PRIVATE include)
+    target_compile_options(fqueue_par PRIVATE -O3 -march=native -flto -DNDEBUG)
+    target_link_options(fqueue_par PRIVATE -flto)
+    target_link_libraries(fqueue_par PRIVATE Threads::Threads)
+    if(OpenMP_C_FOUND)
+        target_link_libraries(fqueue_par PRIVATE OpenMP::OpenMP_C)
+    endif()
 endif()

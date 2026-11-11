@@ -41,6 +41,18 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(exe);
     }
 
+    const par = b.addExecutable(.{
+        .name = "fqueue_par",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/fqueue_par.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    par.root_module.addImport("fqueue", lib);
+    b.installArtifact(par);
+
     const fmt = b.addFmt(.{
         .paths = &.{ "build.zig", "src", "bench" },
         .check = true,

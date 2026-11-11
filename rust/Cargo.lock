@@ -423,6 +423,7 @@ dependencies = [
  "criterion",
  "dhat",
  "proptest",
+ "rayon",
 ]
 
 [[package]]
