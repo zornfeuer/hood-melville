@@ -94,6 +94,7 @@ impl<T> Queue<T> {
 impl<T: Clone> Queue<T> {
     /// Новая очередь с `value` в конце — аналог `fqueue_push`.
     #[must_use]
+    #[inline]
     pub fn push(&self, value: T) -> Self {
         let mut q = self.clone();
         q.push_mut(value);
@@ -103,6 +104,7 @@ impl<T: Clone> Queue<T> {
     /// Новая очередь без первого элемента или `None` для пустой — аналог
     /// `fqueue_pop`.
     #[must_use]
+    #[inline]
     pub fn pop(&self) -> Option<Self> {
         if self.is_empty() {
             return None;
@@ -124,6 +126,7 @@ impl<T: Clone> Queue<T> {
     // `push`/`pop` по месту. Наружу не видны: персистентность обеспечивают
     // публичные обёртки, а итератор и `Extend` работают со своей копией.
 
+    #[inline]
     fn push_mut(&mut self, value: T) {
         // Проверка до любых изменений: при панике (через `Extend` очередь
         // изменяется по месту) она остаётся согласованной.
@@ -137,6 +140,7 @@ impl<T: Clone> Queue<T> {
         self.advance_rotation();
     }
 
+    #[inline]
     fn pop_mut(&mut self) {
         debug_assert!(!self.is_empty());
         self.front.advance();
@@ -152,6 +156,7 @@ impl<T: Clone> Queue<T> {
 
     /// Аналог `start_rotation`: запускается, как только `|rear| > |front|`.
     /// Вызывается только при отсутствии текущей ротации.
+    #[inline]
     fn start_rotation_if_needed(&mut self) {
         if self.rear_len <= self.front_len {
             return;
@@ -162,6 +167,7 @@ impl<T: Clone> Queue<T> {
     }
 
     /// `ROTATION_STEPS` шагов ротации на операцию.
+    #[inline]
     fn advance_rotation(&mut self) {
         for _ in 0..ROTATION_STEPS {
             if let Some(front) = self.rot.step_mut() {
@@ -171,6 +177,7 @@ impl<T: Clone> Queue<T> {
     }
 
     /// Установить новый фронт по завершении ротации — аналог `finish_rotation`.
+    #[inline]
     fn install_front(&mut self, front: Stack<T>) {
         self.front = front;
         self.front_len = self.len - self.rear_len;
@@ -180,6 +187,7 @@ impl<T: Clone> Queue<T> {
 // Вручную: derive потребовал бы `T: Clone`/`T: Default`.
 // `clone` — аналог `fqueue_clone`: O(1), все узлы общие.
 impl<T> Clone for Queue<T> {
+    #[inline]
     fn clone(&self) -> Self {
         Self {
             len: self.len,

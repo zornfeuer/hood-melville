@@ -38,6 +38,7 @@ pub(crate) struct NodePtr<T> {
 
 impl<T> NodePtr<T> {
     /// Новый узел со счётчиком 1 — аналог `cons`.
+    #[inline]
     pub(crate) fn new(value: T, next: Option<Self>) -> Self {
         let node = Box::new(NodeBox {
             refs: Cell::new(1),
@@ -50,22 +51,26 @@ impl<T> NodePtr<T> {
         }
     }
 
+    #[inline]
     fn inner(&self) -> &NodeBox<T> {
         // SAFETY: пока жив `self`, он держит одну из `refs` ссылок, и узел не
         // освобождён; изменяемых ссылок на `NodeBox` не бывает (счётчик — `Cell`).
         unsafe { self.ptr.as_ref() }
     }
 
+    #[inline]
     pub(crate) fn value(&self) -> &T {
         &self.inner().value
     }
 
+    #[inline]
     pub(crate) fn next(&self) -> Option<&Self> {
         self.inner().next.as_ref()
     }
 
     /// Разобрать узел на значение и хвост, если `self` — единственный
     /// владелец; иначе вернуть ссылку обратно.
+    #[inline]
     pub(crate) fn into_parts(self) -> Result<(T, Option<Self>), Self> {
         if self.inner().refs.get() != 1 {
             return Err(self);
@@ -87,6 +92,7 @@ impl<T> NodePtr<T> {
     /// (переиспользованные, разбросанные блоки) промах приходится на
     /// критический путь — `mixed 10^7` замедлялся до 1.4× (см.
     /// `docs/benchmarks.md`).
+    #[inline]
     pub(crate) fn touch(&self) {
         std::hint::black_box(self.inner().refs.get());
     }
@@ -98,6 +104,7 @@ impl<T> NodePtr<T> {
 }
 
 impl<T> Clone for NodePtr<T> {
+    #[inline]
     fn clone(&self) -> Self {
         let refs = &self.inner().refs;
         // Переполнение означает 2^32 живых ссылок; как и `Rc`, не продолжаем.
@@ -118,6 +125,7 @@ impl<T> Clone for NodePtr<T> {
 /// вызовов на длинных списках, поэтому хвост умершего узла освобождается в
 /// том же цикле, пока узлы умирают; на первом живом цикл останавливается.
 impl<T> Drop for NodePtr<T> {
+    #[inline]
     fn drop(&mut self) {
         let mut ptr = self.ptr;
         loop {

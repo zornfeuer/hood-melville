@@ -23,11 +23,13 @@ impl<T> Stack<T> {
     /// `next` передаётся по значению: если вызывающему он больше не нужен,
     /// ссылка просто переезжает в новый узел без изменения счётчика.
     #[must_use]
+    #[inline]
     pub(crate) fn cons(value: T, next: Self) -> Self {
         Self(Some(NodePtr::new(value, next.0)))
     }
 
     /// Вершина стека.
+    #[inline]
     pub(crate) fn head(&self) -> Option<&T> {
         self.0.as_ref().map(NodePtr::value)
     }
@@ -36,6 +38,7 @@ impl<T> Stack<T> {
     ///
     /// Уникальный узел отдаёт свой хвост без изменения счётчика; разделяемый
     /// остаётся другим версиям, а мы берём ещё одну ссылку на его хвост.
+    #[inline]
     pub(crate) fn advance(&mut self) {
         if let Some(node) = self.0.take() {
             self.0 = match node.into_parts() {
@@ -51,6 +54,7 @@ impl<T> Stack<T> {
     }
 
     /// `self = cons(value, self)` — аналог `cons_prepend`.
+    #[inline]
     pub(crate) fn push(&mut self, value: T) {
         let next = std::mem::take(self);
         *self = Self::cons(value, next);
@@ -62,6 +66,7 @@ impl<T> Stack<T> {
     /// Если узлом больше никто не владеет, значение и хвост забираются из него
     /// без копирования; иначе значение клонируется, а узел остаётся другим
     /// версиям нетронутым.
+    #[inline]
     pub(crate) fn pop(&mut self) -> Option<T>
     where
         T: Clone,
@@ -90,6 +95,7 @@ impl<T> Stack<T> {
 // Ручные реализации вместо derive: derive потребовал бы `T: Clone` / `T: Default`,
 // хотя клонируется только указатель на узел.
 impl<T> Clone for Stack<T> {
+    #[inline]
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }

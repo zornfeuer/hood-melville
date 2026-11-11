@@ -51,6 +51,7 @@ pub(crate) enum Rotation<T> {
 
 // Вручную: derive потребовал бы `T: Clone`, хотя клонируются только указатели на узлы.
 impl<T> Clone for Rotation<T> {
+    #[inline]
     fn clone(&self) -> Self {
         match self {
             Self::Idle => Self::Idle,
@@ -89,6 +90,7 @@ impl<T: Clone> Rotation<T> {
     ///
     /// `front` разделяет узлы с живым фронтом очереди; `rear` забирается
     /// у очереди целиком, `front_len == |front|`.
+    #[inline]
     pub(crate) fn start(front: Stack<T>, front_len: Len, rear: Stack<T>) -> Self {
         debug_assert!(
             !rear.is_empty(),
@@ -105,6 +107,7 @@ impl<T: Clone> Rotation<T> {
 
     /// Один шаг ротации на месте — аналог `rotate_step`. По завершении
     /// возвращает новый фронт, а состояние становится `Idle`.
+    #[inline]
     pub(crate) fn step_mut(&mut self) -> Option<Stack<T>> {
         match self {
             Self::Idle => None,
@@ -147,6 +150,7 @@ impl<T: Clone> Rotation<T> {
     /// Выброшенный элемент старого фронта больше не нужно копировать в `acc`,
     /// поэтому `ok` уменьшается. Если копировать больше нечего, `acc` уже
     /// является новым фронтом — он возвращается, состояние становится `Idle`.
+    #[inline]
     pub(crate) fn invalidate_mut(&mut self) -> Option<Stack<T>> {
         const MSG: &str = "pop во время ротации: ok > 0, иначе фронт очереди пуст";
         match self {
@@ -172,6 +176,7 @@ impl<T: Clone> Rotation<T> {
     ///
     /// Остаток `rfront` в этом случае — уже выброшенные `pop`-ом элементы,
     /// он освобождается вместе со стеком.
+    #[inline]
     fn enter_appending(&mut self, ok: Len, rfront: Stack<T>, acc: Stack<T>) -> Option<Stack<T>> {
         if ok == 0 {
             *self = Self::Idle;
