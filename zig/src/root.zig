@@ -582,6 +582,80 @@ fn InternalSuite(comptime atomic: bool) type {
             try std.testing.expectEqual(@as(u32, 1), Q.refCount(q.front_stack.?, .monotonic));
             try std.testing.expectEqual(@as(u32, 8), Q.refCount(tail.?, .monotonic));
         }
+
+        // Случайные истории при малом пределе ссылок и многих живых версиях:
+        // предпроверка nearLimit не должна пропустить ни одного приобретения
+        // (без atomic пропуск — Overflow в `catch unreachable` быстрого пути);
+        // при ошибке версия не меняется, иначе совпадает с моделью.
+        fn randomNearLimit() !void {
+            const Q = QueueWithOptions(i32, .{ .atomic = atomic, .refs_limit = 6 });
+            const a = std.testing.allocator;
+            const max = 12;
+            for (0..300) |seed| {
+                var prng = std.Random.DefaultPrng.init(seed);
+                const rnd = prng.random();
+                var qs: [max]Q = undefined;
+                var models: [max]std.ArrayList(i32) = undefined;
+                var n: usize = 1;
+                qs[0] = Q.init();
+                models[0] = .empty;
+                defer for (qs[0..n], models[0..n]) |*q, *m| {
+                    q.deinit(a);
+                    m.deinit(a);
+                };
+                var next_value: i32 = 0;
+                for (0..400) |_| {
+                    const i = rnd.uintLessThan(usize, n);
+                    const before = qs[i];
+                    switch (rnd.uintLessThan(u8, 6)) {
+                        0 => if (qs[i].pushInPlace(a, next_value)) {
+                            try models[i].append(a, next_value);
+                        } else |err| {
+                            try std.testing.expectEqual(error.Overflow, err);
+                            try std.testing.expect(std.meta.eql(before, qs[i]));
+                        },
+                        1 => if (qs[i].popInPlace(a)) |value| {
+                            if (value) |v| {
+                                try std.testing.expectEqual(models[i].items[0], v);
+                                _ = models[i].orderedRemove(0);
+                            } else try std.testing.expectEqual(@as(usize, 0), models[i].items.len);
+                        } else |err| {
+                            try std.testing.expectEqual(error.Overflow, err);
+                            try std.testing.expect(std.meta.eql(before, qs[i]));
+                        },
+                        2, 3, 4 => |op| if (n < max) {
+                            const child = switch (op) {
+                                2 => qs[i].push(a, next_value),
+                                3 => if (qs[i].pop(a)) |c| c orelse continue else |err| err,
+                                else => qs[i].clone(),
+                            } catch |err| {
+                                try std.testing.expectEqual(error.Overflow, err);
+                                continue;
+                            };
+                            qs[n] = child;
+                            models[n] = try models[i].clone(a);
+                            switch (op) {
+                                2 => try models[n].append(a, next_value),
+                                3 => _ = models[n].orderedRemove(0),
+                                else => {},
+                            }
+                            n += 1;
+                        },
+                        else => if (n > 1) {
+                            qs[i].deinit(a);
+                            models[i].deinit(a);
+                            n -= 1;
+                            qs[i] = qs[n];
+                            models[i] = models[n];
+                        },
+                    }
+                    next_value += 1;
+                    if (i >= n) continue; // удалена последняя версия
+                    try std.testing.expectEqual(@as(u32, @intCast(models[i].items.len)), qs[i].len());
+                    try std.testing.expectEqual(if (models[i].items.len > 0) models[i].items[0] else null, qs[i].front());
+                }
+            }
+        }
     };
 }
 test "обе реализации" {
@@ -591,6 +665,7 @@ test "обе реализации" {
         try InternalSuite(atomic).allocationFreePop();
         try InternalSuite(atomic).nearLimitFailures();
         try InternalSuite(atomic).advanceOverflowRollback();
+        try InternalSuite(atomic).randomNearLimit();
     }
 }
 
