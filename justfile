@@ -89,7 +89,7 @@ bench_cases_mut := "--case fill:1000000 --case fill_mut:1000000 --case mixed:100
 
 # Варианты раскладки кода (выравнивание функций и циклов, байт). Склонность к
 # медленному режиму аллокатора зависит от раскладки сборки, поэтому реализации
-# сравниваются по нескольким раскладкам, одинаково для C и Rust.
+# сравниваются по нескольким раскладкам, одинаково для C, Rust и Zig.
 bench_layouts := "16 32 64 128"
 
 # Быстрое сравнение текущих сборок (одна раскладка).
@@ -97,17 +97,28 @@ bench-compare rounds="20": bench-build
     python3 -I bench/compare.py --rounds {{rounds}} --out bench-results/compare {{bench_cases}} \
         C=build/c/fqueue_bench Rust=rust/target/max/examples/fqueue_bench Zig=zig/zig-out/bin/fqueue_bench
 
+# Zig-нагрузка как LLVM bitcode (sync: true/false): в Zig 0.16 нет опций
+# выравнивания функций и циклов, поэтому раскладки собирает clang из bitcode
+# (-falign-functions/-falign-loops, как у C). Скорость сборки через clang
+# совпадает с родной zig build (persistent 10^6: 515–525 млн тактов у обеих).
+zig-layout-bc sync out:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=$(cd "$(dirname "{{out}}")" && pwd)/$(basename "{{out}}")
+    echo "pub const sync = {{sync}};" > "$out.options.zig"
+    cd zig && zig build-exe -O ReleaseFast -mcpu native -lc --global-cache-dir .zig-cache-global \
+        --dep fqueue --dep bench_options -Mroot=bench/fqueue_bench.zig -Mfqueue=src/root.zig \
+        -Mbench_options="$out.options.zig" -femit-llvm-bc="$out" -fno-emit-bin
+
 # Собрать варианты раскладки текущих исходников: build/bench-layout/<label>/{C,Rust,Zig}-al<N>.
 bench-layouts label="cur":
     #!/usr/bin/env bash
     set -euo pipefail
     dir=build/bench-layout/{{label}}
     mkdir -p "$dir"
-    (cd zig && zig build --global-cache-dir .zig-cache-global -Doptimize=ReleaseFast -Dcpu=native)
-    # Zig 0.16 не предоставляет CLI-опций выравнивания всех функций/циклов.
-    # До появления таких опций эти четыре имени обозначают одну сборку.
+    just zig-layout-bc false "$dir/zig.bc"
     for a in {{bench_layouts}}; do
-        cp zig/zig-out/bin/fqueue_bench "$dir/Zig-al$a"
+        clang -O3 -mcpu=native -falign-functions=$a -falign-loops=$a "$dir/zig.bc" -o "$dir/Zig-al$a" 2>/dev/null
         cc -O3 -march=native -flto -DNDEBUG -Ic/include -falign-functions=$a -falign-loops=$a \
             c/bench/fqueue_bench.c c/src/fqueue.c -o "$dir/C-al$a"
         log2=0; x=$a; while (( x > 1 )); do x=$(( x / 2 )); log2=$(( log2 + 1 )); done
@@ -124,9 +135,9 @@ bench-layouts-sync label="cur":
     set -euo pipefail
     dir=build/bench-layout/{{label}}
     mkdir -p "$dir"
-    (cd zig && zig build --global-cache-dir .zig-cache-global -Doptimize=ReleaseFast -Dcpu=native)
+    just zig-layout-bc true "$dir/zig-sync.bc"
     for a in {{bench_layouts}}; do
-        cp zig/zig-out/bin/fqueue_bench_sync "$dir/Zig-sync-al$a"
+        clang -O3 -mcpu=native -falign-functions=$a -falign-loops=$a "$dir/zig-sync.bc" -o "$dir/Zig-sync-al$a" 2>/dev/null
         cc -O3 -march=native -flto -DNDEBUG -DFQUEUE_BENCH_SYNC -Ic/include -falign-functions=$a -falign-loops=$a \
             c/bench/fqueue_bench.c c/src/fqueue.c -o "$dir/C-sync-al$a"
         log2=0; x=$a; while (( x > 1 )); do x=$(( x / 2 )); log2=$(( log2 + 1 )); done
@@ -137,15 +148,14 @@ bench-layouts-sync label="cur":
     echo "раскладки: $dir"
 
 # Цена потокобезопасности в одном потоке: каждая реализация рядом со своим
-# вариантом на атомарных счётчиках, по 4 раскладкам (Zig — по одной).
+# вариантом на атомарных счётчиках, по 4 раскладкам.
 bench-compare-sync rounds="8": (bench-layouts "cur") (bench-layouts-sync "cur")
     #!/usr/bin/env bash
     set -euo pipefail
     bins=()
-    for impl in C C-sync Rust Rust-sync; do
+    for impl in C C-sync Rust Rust-sync Zig Zig-sync; do
         for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
     done
-    bins+=("Zig/al64=build/bench-layout/cur/Zig-al64" "Zig-sync/al64=build/bench-layout/cur/Zig-sync-al64")
     python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-sync \
         {{bench_cases}} "${bins[@]}"
 
@@ -154,11 +164,9 @@ bench-compare-layouts rounds="8": (bench-layouts "cur")
     #!/usr/bin/env bash
     set -euo pipefail
     bins=()
-    for impl in C Rust; do
+    for impl in C Rust Zig; do
         for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
     done
-    # У Zig одна сборка на все раскладки — прогонять её четырежды незачем.
-    bins+=("Zig/al64=build/bench-layout/cur/Zig-al64")
     python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-layouts \
         {{bench_cases}} "${bins[@]}"
 
@@ -167,11 +175,9 @@ bench-compare-mut rounds="8": (bench-layouts "cur")
     #!/usr/bin/env bash
     set -euo pipefail
     bins=()
-    for impl in C Rust; do
+    for impl in C Rust Zig; do
         for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
     done
-    # У Zig одна сборка на все раскладки — прогонять её четырежды незачем.
-    bins+=("Zig/al64=build/bench-layout/cur/Zig-al64")
     python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-mut \
         {{bench_cases_mut}} "${bins[@]}"
 
