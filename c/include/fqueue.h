@@ -27,15 +27,15 @@
 #include "fqueue_template.h"
 
 // The same two with nodes from a node pool (docs/pool.md).
-#define FQUEUE_API       HOOD_MELVILLE_FQUEUE_EXPORT
-#define FQUEUE_NAME      fqueue_pooled
-#define FQUEUE_T         int
+#define FQUEUE_API  HOOD_MELVILLE_FQUEUE_EXPORT
+#define FQUEUE_NAME fqueue_pooled
+#define FQUEUE_T    int
 #define FQUEUE_NODE_POOL
 #include "fqueue_template.h"
 
-#define FQUEUE_API       HOOD_MELVILLE_FQUEUE_EXPORT
-#define FQUEUE_NAME      fqueue_pooled_sync
-#define FQUEUE_T         int
+#define FQUEUE_API  HOOD_MELVILLE_FQUEUE_EXPORT
+#define FQUEUE_NAME fqueue_pooled_sync
+#define FQUEUE_T    int
 #define FQUEUE_NODE_POOL
 #include "fqueue_template.h"
 

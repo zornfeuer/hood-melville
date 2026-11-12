@@ -24,7 +24,8 @@ TEST_CASE("fqueue_init produces an empty queue", "[fqueue]") {
 }
 
 TEST_CASE("fqueue_strerror describes every status", "[fqueue]") {
-  for (fqueue_status s : {FQUEUE_OK, FQUEUE_EMPTY, FQUEUE_NOMEM, FQUEUE_OVERFLOW})
+  for (fqueue_status s :
+       {FQUEUE_OK, FQUEUE_EMPTY, FQUEUE_NOMEM, FQUEUE_OVERFLOW})
     REQUIRE(std::strlen(fqueue_strerror(s)) > 0);
 }
 
@@ -37,6 +38,8 @@ TEST_CASE("fqueue_pop on an empty queue fails and leaves out untouched",
   std::memcpy(before, &out, sizeof out);
 
   REQUIRE(fqueue_pop(&out, &q) == FQUEUE_EMPTY);
+  // Bytes, padding included: *out must not be written at all.
+  // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison,cert-exp42-c,cert-flp37-c)
   REQUIRE(std::memcmp(before, &out, sizeof out) == 0);
   fqueue_destroy(&q);
 }
@@ -192,15 +195,16 @@ TEST_CASE("fqueue rotation: front_len+1 pops during rotation don't crash",
   // Rotation starts when rear_len = front_len + 1, here front_len = 1.
   // Doing front_len+1 = 2 pops exhausts the old front mid-rotation.
   // finish_rotation must install the new front before front becomes NULL.
-  Q q = Q().push(1)  // front=[1], rear=[]
-             .push(2)  // front=[1], rear=[2], rear_len=1 <= front_len=1
-             .push(3); // rear_len=2 > front_len=1 → rotation starts
+  Q q = Q().push(1)   // front=[1], rear=[]
+            .push(2)  // front=[1], rear=[2], rear_len=1 <= front_len=1
+            .push(3); // rear_len=2 > front_len=1 → rotation starts
 
   // front still = [1]; pop exhausts it while rotation is in flight
   REQUIRE(q.front() == 1);
   q = *q.pop();
 
-  // new front from rotation must be ready — must not crash or return wrong value
+  // new front from rotation must be ready — must not crash or return wrong
+  // value
   REQUIRE(q.front() == 2);
   q = *q.pop();
 
@@ -255,8 +259,7 @@ TEST_CASE("fqueue_clone shares contents and outlives the original",
   // Build a version in the middle of a rotation, so that the clone also has
   // to retain the rotation's node lists.
   Q q;
-  for (int i = 0; i < 9; ++i)
-    q = q.push(i);
+  for (int i = 0; i < 9; ++i) q = q.push(i);
   q = *q.pop();
 
   fqueue c;
@@ -290,8 +293,7 @@ TEST_CASE("fqueue_iter: empty queue, end of iteration, outliving the version",
   std::vector<int> expected;
   {
     Q q;
-    for (int i = 0; i < 9; ++i)
-      q = q.push(i);
+    for (int i = 0; i < 9; ++i) q = q.push(i);
     q = *q.pop();
     expected = contents(q);
     fqueue_iter_init(&it, q.get());
@@ -299,8 +301,7 @@ TEST_CASE("fqueue_iter: empty queue, end of iteration, outliving the version",
     REQUIRE(v == expected[0]);
   }
   std::vector<int> rest;
-  while (fqueue_iter_next(&it, &v) == FQUEUE_OK)
-    rest.push_back(v);
+  while (fqueue_iter_next(&it, &v) == FQUEUE_OK) rest.push_back(v);
   REQUIRE(rest == std::vector<int>(expected.begin() + 1, expected.end()));
   REQUIRE(fqueue_iter_next(&it, &v) == FQUEUE_EMPTY); // stays at the end
   fqueue_iter_destroy(&it);
@@ -339,7 +340,7 @@ TEST_CASE("fqueue branching history stored by value matches a reference model",
   uint64_t x = 0x9E3779B97F4A7C15u;
   size_t heads[BRANCHES] = {0};
   std::vector<fqueue> versions(1);
-  fqueue_init(&versions[0]);
+  fqueue_init(&versions.front());
   std::vector<std::deque<int>> models{{}};
   size_t max_len = 0;
 
@@ -375,8 +376,7 @@ TEST_CASE("fqueue branching history stored by value matches a reference model",
     std::vector<int> expected(models[i].begin(), models[i].end());
     REQUIRE(contents(&versions[i]) == expected);
   }
-  for (fqueue &q : versions)
-    fqueue_destroy(&q);
+  for (fqueue &q : versions) fqueue_destroy(&q);
 }
 
 // Every push/pop history up to DEPTH operations, checked against std::deque
@@ -499,14 +499,14 @@ TEST_CASE("fqueue in-place operations on a version owned alone match a model",
 // Builds a queue with n elements. Not measured — just setup.
 static Q bench_make_queue(int n) {
   Q q;
-  for (int i = 0; i < n; ++i)
-    q = q.push(i);
+  for (int i = 0; i < n; ++i) q = q.push(i);
   return q;
 }
 
 TEST_CASE("bench: fqueue_push is O(1) worst-case", "[fqueue][benchmark]") {
   // Each sub-benchmark measures a SINGLE push onto a pre-built queue of size N.
-  // If push were O(n), these numbers would scale linearly — they should be flat.
+  // If push were O(n), these numbers would scale linearly — they should be
+  // flat.
   BENCHMARK_ADVANCED("push at N=100")(Catch::Benchmark::Chronometer meter) {
     Q q = bench_make_queue(100);
     meter.measure([&] { return q.push(42); });
@@ -546,16 +546,19 @@ TEST_CASE("bench: fqueue_pop is O(1) worst-case", "[fqueue][benchmark]") {
   };
 }
 
-TEST_CASE("bench: rotation-trigger push vs normal push", "[fqueue][benchmark]") {
+TEST_CASE("bench: rotation-trigger push vs normal push",
+          "[fqueue][benchmark]") {
   // The push that triggers rotation (rear_len just exceeded front_len) is
   // the theoretical worst case for a naive queue. Here it should cost the same
   // as a push that does nothing special.
-  BENCHMARK_ADVANCED("rotation-trigger push at N=10 000")(Catch::Benchmark::Chronometer meter) {
+  BENCHMARK_ADVANCED("rotation-trigger push at N=10 000")(
+      Catch::Benchmark::Chronometer meter) {
     // Build N-1 elements so the very next push fires start_rotation.
     Q q = bench_make_queue(10'000 - 1);
     meter.measure([&] { return q.push(42); });
   };
-  BENCHMARK_ADVANCED("normal push at N=10 000")(Catch::Benchmark::Chronometer meter) {
+  BENCHMARK_ADVANCED("normal push at N=10 000")(
+      Catch::Benchmark::Chronometer meter) {
     // Pop once after building so rear_len < front_len — next push stays idle.
     Q q = *bench_make_queue(10'000).pop();
     meter.measure([&] { return q.push(42); });

@@ -27,6 +27,7 @@ usage:
 не кодом очереди, поэтому выводы о реализациях делаются только по нескольким
 раскладкам.
 """
+
 import argparse
 import ctypes
 import json
@@ -47,13 +48,21 @@ MODE_GAP = 1.12  # соседние IPC, различающиеся сильне
 _libc = ctypes.CDLL('/usr/lib/libSystem.dylib', use_errno=True)
 P_PID, WEXITED, WNOWAIT = 1, 0x4, 0x20
 RUSAGE_INFO_V4 = 4
-RI_LIFETIME_MAX_PHYS_FOOTPRINT, RI_INSTRUCTIONS, RI_CYCLES = 30, 31, 32  # поля rusage_info_v4 по 8 байт
+RI_LIFETIME_MAX_PHYS_FOOTPRINT, RI_INSTRUCTIONS, RI_CYCLES = (
+    30,
+    31,
+    32,
+)  # поля rusage_info_v4 по 8 байт
 
 
 def run_once(path, scenario, n, env=None):
     t0 = time.perf_counter()
-    proc = subprocess.Popen([path, scenario, str(n)], stdout=subprocess.PIPE, text=True,
-                            env={**os.environ, **env} if env else None)
+    proc = subprocess.Popen(
+        [path, scenario, str(n)],
+        stdout=subprocess.PIPE,
+        text=True,
+        env={**os.environ, **env} if env else None,
+    )
     stdout = proc.stdout.read()
     info = ctypes.create_string_buffer(128)  # siginfo_t
     if _libc.waitid(P_PID, proc.pid, info, WEXITED | WNOWAIT) != 0:
@@ -66,8 +75,12 @@ def run_once(path, scenario, n, env=None):
     wall = time.perf_counter() - t0
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, [path, scenario, str(n)])
-    m = {'cycles': ri[RI_CYCLES], 'instructions': ri[RI_INSTRUCTIONS],
-         'reclaims': ru.ru_minflt, 'peak': ri[RI_LIFETIME_MAX_PHYS_FOOTPRINT]}
+    m = {
+        'cycles': ri[RI_CYCLES],
+        'instructions': ri[RI_INSTRUCTIONS],
+        'reclaims': ru.ru_minflt,
+        'peak': ri[RI_LIFETIME_MAX_PHYS_FOOTPRINT],
+    }
     m['wall_ms'] = wall * 1e3
     m['ipc'] = m['instructions'] / m['cycles']
     m['checksum'] = stdout.strip()
@@ -97,8 +110,12 @@ def q(xs, p):
 def describe(runs, key='cycles'):
     xs = [r[key] for r in runs]
     return {
-        'n': len(xs), 'median': st.median(xs), 'p25': q(xs, .25), 'p75': q(xs, .75),
-        'min': min(xs), 'max': max(xs),
+        'n': len(xs),
+        'median': st.median(xs),
+        'p25': q(xs, 0.25),
+        'p75': q(xs, 0.75),
+        'min': min(xs),
+        'max': max(xs),
         'cv': st.stdev(xs) / st.mean(xs) if len(xs) > 1 else 0.0,
     }
 
@@ -117,9 +134,11 @@ def wilson(k, n, z=1.96):
 def ratio_ci(a, b, rng, iters=2000):
     """Медиана(b)/медиана(a) и бутстреп-интервал 95%."""
     point = st.median(b) / st.median(a)
-    samples = sorted(st.median(rng.choices(b, k=len(b))) / st.median(rng.choices(a, k=len(a)))
-                     for _ in range(iters))
-    return point, samples[int(.025 * iters)], samples[int(.975 * iters)]
+    samples = sorted(
+        st.median(rng.choices(b, k=len(b))) / st.median(rng.choices(a, k=len(a)))
+        for _ in range(iters)
+    )
+    return point, samples[int(0.025 * iters)], samples[int(0.975 * iters)]
 
 
 def main():
@@ -129,10 +148,19 @@ def main():
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--case', action='append', required=True)
     ap.add_argument('--out', default='bench-results')
-    ap.add_argument('--settle', type=int, default=0,
-                    help='ждать до N секунд, пока load average не опустится ниже 1.5')
-    ap.add_argument('--env', action='append', default=[], metavar='NAME:VAR=VALUE',
-                    help='переменная окружения для бинарника NAME (например, подстановка аллокатора)')
+    ap.add_argument(
+        '--settle',
+        type=int,
+        default=0,
+        help='ждать до N секунд, пока load average не опустится ниже 1.5',
+    )
+    ap.add_argument(
+        '--env',
+        action='append',
+        default=[],
+        metavar='NAME:VAR=VALUE',
+        help='переменная окружения для бинарника NAME (например, подстановка аллокатора)',
+    )
     ap.add_argument('bins', nargs='+')
     args = ap.parse_args()
     bins = [b.split('=', 1) for b in args.bins]
@@ -148,11 +176,15 @@ def main():
         time.sleep(5)
     load1 = os.getloadavg()[0]
     out(f'# Сравнение: {", ".join(n for n, _ in bins)}\n')
-    out(f'Раундов: {args.rounds}, прогрев: {args.warmup}, seed: {args.seed}, '
-        f'load average перед стартом: {load1:.2f}')
+    out(
+        f'Раундов: {args.rounds}, прогрев: {args.warmup}, seed: {args.seed}, '
+        f'load average перед стартом: {load1:.2f}'
+    )
     if load1 > 1.5:
-        out(f'\n**Внимание:** система нагружена (load average {load1:.2f}); фоновая '
-            'нагрузка увеличивает разброс и меняет долю режимов.')
+        out(
+            f'\n**Внимание:** система нагружена (load average {load1:.2f}); фоновая '
+            'нагрузка увеличивает разброс и меняет долю режимов.'
+        )
     raw = {}
     for case in args.case:
         scenario, n = case.split(':')
@@ -198,25 +230,30 @@ def fmt_m(c):
 def report(case, runs, bins, rng):
     base = bins[0][0]
     out(f'\n### {case}\n')
-    out('| бинарник | режим | запусков | такты, млн: медиана [IQR] | мин–макс | CV | '
-          'IPC | reclaims | время, мс | инстр., млн | пик, МиБ |')
+    out(
+        '| бинарник | режим | запусков | такты, млн: медиана [IQR] | мин–макс | CV | '
+        'IPC | reclaims | время, мс | инстр., млн | пик, МиБ |'
+    )
     out('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
     modes_of = {}
     for name, _ in bins:
         rs = runs[name]
         modes = split_modes(rs)
         modes_of[name] = modes
-        groups = [('все', rs)] + ([(f'режим {i + 1}', m) for i, m in enumerate(modes)]
-                                  if len(modes) > 1 else [])
+        groups = [('все', rs)] + (
+            [(f'режим {i + 1}', m) for i, m in enumerate(modes)] if len(modes) > 1 else []
+        )
         for label, g in groups:
             c = describe(g)
-            out(f"| {name} | {label} | {c['n']} | {fmt_m(c)} | "
-                  f"{c['min'] / 1e6:.0f}–{c['max'] / 1e6:.0f} | {100 * c['cv']:.1f}% | "
-                  f"{st.median(r['ipc'] for r in g):.2f} | "
-                  f"{st.median(r['reclaims'] for r in g):.0f} | "
-                  f"{st.median(r['wall_ms'] for r in g):.1f} | "
-                  f"{st.median(r['instructions'] for r in g) / 1e6:.0f} | "
-                  f"{st.median(r['peak'] for r in g) / 2**20:.0f} |")
+            out(
+                f"| {name} | {label} | {c['n']} | {fmt_m(c)} | "
+                f"{c['min'] / 1e6:.0f}–{c['max'] / 1e6:.0f} | {100 * c['cv']:.1f}% | "
+                f"{st.median(r['ipc'] for r in g):.2f} | "
+                f"{st.median(r['reclaims'] for r in g):.0f} | "
+                f"{st.median(r['wall_ms'] for r in g):.1f} | "
+                f"{st.median(r['instructions'] for r in g) / 1e6:.0f} | "
+                f"{st.median(r['peak'] for r in g) / 2**20:.0f} |"
+            )
     out()
     for name, _ in bins[1:]:
         a = [r['cycles'] for r in runs[base]]
@@ -227,10 +264,12 @@ def report(case, runs, bins, rng):
         if len(modes_of[base]) > 1 or len(modes_of[name]) > 1:
             p, lo, hi = ratio_ci([r['cycles'] for r in fa], [r['cycles'] for r in fb], rng)
             line += f'; быстрые режимы: **{p:.3f}** ({lo:.3f}–{hi:.3f})'
+
             def share(nm):
                 k, n = len(modes_of[nm][0]), len(runs[nm])
                 lo, hi = wilson(k, n)
                 return f'{k}/{n} (95% CI {100 * lo:.0f}–{100 * hi:.0f}%)'
+
             line += f'; доля быстрого режима: {base} {share(base)}, {name} {share(name)}'
         out(line)
 
@@ -238,8 +277,10 @@ def report(case, runs, bins, rng):
 def report_impls(case, runs, impls, rng):
     """Сводка по реализациям через все их раскладки."""
     out(f'\n#### {case}: по реализациям (все раскладки вместе)\n')
-    out('| реализация | раскладок | запусков | доля быстрого режима | такты быстрого режима, млн: '
-        'медиана [IQR] | такты медленного режима, млн | медианы быстрого режима по раскладкам |')
+    out(
+        '| реализация | раскладок | запусков | доля быстрого режима | такты быстрого режима, млн: '
+        'медиана [IQR] | такты медленного режима, млн | медианы быстрого режима по раскладкам |'
+    )
     out('|---|---:|---:|---:|---:|---:|---|')
     pooled = {}
     for impl, names in impls.items():
@@ -255,9 +296,11 @@ def report_impls(case, runs, impls, rng):
         lo, hi = wilson(len(fast), len(allr))
         c = describe(fast)
         slow_s = f"{st.median(r['cycles'] for r in slow) / 1e6:.1f} ({len(slow)})" if slow else '—'
-        out(f'| {impl} | {len(names)} | {len(allr)} | {len(fast)}/{len(allr)} '
+        out(
+            f'| {impl} | {len(names)} | {len(allr)} | {len(fast)}/{len(allr)} '
             f'({100 * lo:.0f}–{100 * hi:.0f}%) | {fmt_m(c)} | {slow_s} | '
-            f'{", ".join(f"{x:.0f}" for x in per_layout)} |')
+            f'{", ".join(f"{x:.0f}" for x in per_layout)} |'
+        )
     out()
     names = list(pooled)
     base = names[0]

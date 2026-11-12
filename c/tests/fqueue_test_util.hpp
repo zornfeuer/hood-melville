@@ -57,14 +57,16 @@ public:
   }
 
   size_t size() const { return fqueue_size(&q_); }
-  bool   empty() const { return fqueue_is_empty(&q_); }
+  bool empty() const { return fqueue_is_empty(&q_); }
 
   const fqueue *get() const { return &q_; }
 
 private:
   struct Uninit {};
   static constexpr Uninit uninit{};
-  explicit Q(Uninit) {} // storage for an fqueue_* output parameter
+  // Storage for an fqueue_* output parameter, written by the call.
+  // NOLINTNEXTLINE(clang-analyzer-optin.cplusplus.UninitializedObject)
+  explicit Q(Uninit /*tag*/) {}
 
   // A failed operation leaves q_ uninitialized: make it a valid empty queue
   // for the destructor, then report.
@@ -91,8 +93,7 @@ inline std::vector<int> contents(const fqueue *q) {
   fqueue_iter_init(&it, q);
   int v;
   fqueue_status s;
-  while ((s = fqueue_iter_next(&it, &v)) == FQUEUE_OK)
-    out.push_back(v);
+  while ((s = fqueue_iter_next(&it, &v)) == FQUEUE_OK) out.push_back(v);
   fqueue_iter_destroy(&it);
   REQUIRE(s == FQUEUE_EMPTY);
   REQUIRE(out.size() == fqueue_size(q));

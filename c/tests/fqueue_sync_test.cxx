@@ -1,6 +1,7 @@
 // fqueue_sync (FQUEUE_ATOMIC): the same semantics as fqueue — checked by
 // running the exhaustive model test for every instantiation — plus use from
-// several threads, also with the node pool (fqueue_pooled_sync). Run under ThreadSanitizer with `just c-tsan`.
+// several threads, also with the node pool (fqueue_pooled_sync). Run under
+// ThreadSanitizer with `just c-tsan`.
 
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -15,7 +16,8 @@
 // Every push/pop history up to `depth` operations, against std::deque; in
 // every state also in-place operations on a clone (which shares every node).
 template <class Q>
-static void explore(const Q *q, std::deque<int> &model, int depth, long &states) {
+static void explore(const Q *q, std::deque<int> &model, int depth,
+                    long &states) {
   using A = Api<Q>;
   ++states;
   REQUIRE(contents_of(q) == as_vector(model));
@@ -50,7 +52,8 @@ static void explore(const Q *q, std::deque<int> &model, int depth, long &states)
 }
 
 TEMPLATE_TEST_CASE("all instantiations match a model on all short histories",
-                   "[sync]", fqueue, fqueue_sync, fqueue_pooled, fqueue_pooled_sync) {
+                   "[sync]", fqueue, fqueue_sync, fqueue_pooled,
+                   fqueue_pooled_sync) {
   using A = Api<TestType>;
   TestType q;
   A::init(&q);
@@ -73,7 +76,7 @@ TEMPLATE_TEST_CASE("threads derive versions from shared versions", "[sync]",
   using A = Api<TestType>;
   // Shared versions in different rotation states, with their models.
   std::vector<TestType> shared(1);
-  A::init(&shared[0]);
+  A::init(&shared.front());
   std::vector<std::deque<int>> models{{}};
   for (int i = 0; i < 40; ++i) {
     TestType next;
@@ -94,6 +97,7 @@ TEMPLATE_TEST_CASE("threads derive versions from shared versions", "[sync]",
   enum { THREADS = 8, ROUNDS = 2000 };
   std::vector<int> failures(THREADS, 0);
   std::vector<std::thread> threads;
+  threads.reserve(THREADS);
   for (int t = 0; t < THREADS; ++t) {
     threads.emplace_back([&, t] {
       uint64_t x = 0x9E3779B97F4A7C15u ^ (uint64_t)(t + 1);
@@ -107,7 +111,9 @@ TEMPLATE_TEST_CASE("threads derive versions from shared versions", "[sync]",
           if (xorshift(x) % 3 == 0) {
             int v = -1;
             fqueue_status s = A::pop_in_place(&q, &v);
-            if (m.empty() ? s != FQUEUE_EMPTY : (s != FQUEUE_OK || v != m.front())) failures[t] = 2;
+            if (m.empty() ? s != FQUEUE_EMPTY
+                          : (s != FQUEUE_OK || v != m.front()))
+              failures[t] = 2;
             if (!m.empty()) m.pop_front();
           } else {
             TestType next; // persistent push from q, then in place
@@ -124,15 +130,15 @@ TEMPLATE_TEST_CASE("threads derive versions from shared versions", "[sync]",
         A::iter_init(&it, &q);
         int v;
         for (int expected : m)
-          if (A::iter_next(&it, &v) != FQUEUE_OK || v != expected) failures[t] = 6;
+          if (A::iter_next(&it, &v) != FQUEUE_OK || v != expected)
+            failures[t] = 6;
         if (A::iter_next(&it, &v) != FQUEUE_EMPTY) failures[t] = 7;
         A::iter_destroy(&it);
         A::destroy(&q);
       }
     });
   }
-  for (std::thread &th : threads)
-    th.join();
+  for (std::thread &th : threads) th.join();
   for (int t = 0; t < THREADS; ++t) {
     INFO("thread " << t);
     REQUIRE(failures[t] == 0);
@@ -149,8 +155,7 @@ TEMPLATE_TEST_CASE("versions are destroyed in other threads", "[sync]",
   enum { N = 20000, VERSIONS = 8 };
   TestType base;
   A::init(&base);
-  for (int i = 0; i < N; ++i)
-    REQUIRE(A::push_in_place(&base, i) == FQUEUE_OK);
+  for (int i = 0; i < N; ++i) REQUIRE(A::push_in_place(&base, i) == FQUEUE_OK);
   std::vector<TestType> versions(VERSIONS);
   for (int i = 0; i < VERSIONS; ++i) {
     A::clone(&versions[i], &base);
@@ -159,10 +164,10 @@ TEMPLATE_TEST_CASE("versions are destroyed in other threads", "[sync]",
   }
   A::destroy(&base);
   std::vector<std::thread> threads;
+  threads.reserve(versions.size());
   for (TestType &v : versions)
     threads.emplace_back([&v] { Api<TestType>::destroy(&v); });
-  for (std::thread &th : threads)
-    th.join();
+  for (std::thread &th : threads) th.join();
 }
 
 TEMPLATE_TEST_CASE("threads read shared nodes, the last owner frees them",
@@ -180,22 +185,19 @@ TEMPLATE_TEST_CASE("threads read shared nodes, the last owner frees them",
     for (int i = 0; i < N; ++i)
       REQUIRE(A::push_in_place(&base, i) == FQUEUE_OK);
     std::vector<TestType> clones(THREADS);
-    for (TestType &c : clones)
-      A::clone(&c, &base);
+    for (TestType &c : clones) A::clone(&c, &base);
     A::destroy(&base);
     std::vector<long> sums(THREADS, 0);
     std::vector<std::thread> threads;
+    threads.reserve(THREADS);
     for (int t = 0; t < THREADS; ++t) {
       threads.emplace_back([&, t] {
         int v;
-        while (A::pop_in_place(&clones[t], &v) == FQUEUE_OK)
-          sums[t] += v;
+        while (A::pop_in_place(&clones[t], &v) == FQUEUE_OK) sums[t] += v;
         A::destroy(&clones[t]);
       });
     }
-    for (std::thread &th : threads)
-      th.join();
-    for (long sum : sums)
-      REQUIRE(sum == (long)N * (N - 1) / 2);
+    for (std::thread &th : threads) th.join();
+    for (long sum : sums) REQUIRE(sum == (long)N * (N - 1) / 2);
   }
 }

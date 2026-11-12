@@ -25,6 +25,7 @@ usage:
            [--env NAME:VAR=VALUE ...] NAME=PATH [NAME=PATH ...]
 Код выхода 1 с --fail-on-regression, если есть отмеченное ухудшение.
 """
+
 import argparse
 import json
 import os
@@ -35,6 +36,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compare import ratio_ci, run_once  # noqa: E402
 
+
 def spread(xs):
     """Разброс p10–p90 относительно медианы, %."""
     xs = sorted(xs)
@@ -42,8 +44,15 @@ def spread(xs):
     return (xs[round(0.9 * k)] - xs[round(0.1 * k)]) / st.median(xs) * 100
 
 
-DEFAULT_CASES = ['fill:300000', 'mixed:300000', 'persistent:200000', 'branching:300000',
-                 'fill_mut:300000', 'mixed_mut:300000', 'fill:3000000']
+DEFAULT_CASES = [
+    'fill:300000',
+    'mixed:300000',
+    'persistent:200000',
+    'branching:300000',
+    'fill_mut:300000',
+    'mixed_mut:300000',
+    'fill:3000000',
+]
 
 
 def main():
@@ -76,8 +85,13 @@ def main():
         for case, name, path in order:
             scenario, n = case.split(':')
             m = run_once(path, scenario, n, envs.get(name))
-            runs[case][name].append({'cycles': m['cycles'], 'instructions': m['instructions'],
-                                     'checksum': m['checksum']})
+            runs[case][name].append(
+                {
+                    'cycles': m['cycles'],
+                    'instructions': m['instructions'],
+                    'checksum': m['checksum'],
+                }
+            )
     for case in cases:
         sums = {r['checksum'] for rs in runs[case].values() for r in rs}
         if len(sums) != 1:
@@ -88,7 +102,9 @@ def main():
         with open(a.baseline) as f:
             base = json.load(f)
     print(f'база: {a.baseline}' + ('' if base else ' (нет — только текущие значения)'))
-    print('\n| сценарий | бинарник | такты, млн | Δ тактов (95%) | инструкции, млн | Δ инструкций |')
+    print(
+        '\n| сценарий | бинарник | такты, млн | Δ тактов (95%) | инструкции, млн | Δ инструкций |'
+    )
     print('|---|---|---:|---|---:|---:|')
     regressions = []
     for case in cases:
@@ -103,7 +119,10 @@ def main():
                 oins = st.median(r['instructions'] for r in old) / 1e6
                 pt, lo, hi = ratio_ci(ocyc, cyc, rng)
                 c_noise = max(spread(ocyc), spread(cyc))
-                i_noise = max(spread([r['instructions'] for r in old]), spread([r['instructions'] for r in cur]))
+                i_noise = max(
+                    spread([r['instructions'] for r in old]),
+                    spread([r['instructions'] for r in cur]),
+                )
                 c_mark = (lo > 1 or hi < 1) and abs(pt - 1) * 100 > max(a.cycles_tol, c_noise)
                 i_delta = (ins / oins - 1) * 100
                 i_mark = abs(i_delta) > max(a.instr_tol, i_noise)
@@ -117,9 +136,11 @@ def main():
                     regressions.append(f'{case} {name}')
             print(f'| {case} | {name} | {st.median(cyc):.1f} | {dc} | {ins:.1f} | {di} |')
     if base:
-        print('\n▲ — больше (хуже), ▼ — меньше (лучше): сдвиг больше порога (такты '
-              f'{a.cycles_tol}%, инструкции {a.instr_tol}%) и больше разброса p10–p90; '
-              'такты — ещё и при интервале без 1.')
+        print(
+            '\n▲ — больше (хуже), ▼ — меньше (лучше): сдвиг больше порога (такты '
+            f'{a.cycles_tol}%, инструкции {a.instr_tol}%) и больше разброса p10–p90; '
+            'такты — ещё и при интервале без 1.'
+        )
         print('Ухудшения: ' + (', '.join(regressions) if regressions else 'нет'))
     if a.save:
         merged = dict(base)

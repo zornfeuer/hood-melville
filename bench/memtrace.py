@@ -17,6 +17,7 @@ usage:
   memtrace.py [--repeat K] [--interval MS] [--env NAME:VAR=VALUE ...]
               --case wave:2000000 NAME=PATH [NAME=PATH ...]
 """
+
 import argparse
 import ctypes
 import json
@@ -47,8 +48,12 @@ def trace(path, scenario, n, env, interval):
     это пик (grow) и дно (shrink) каждой волны.
     """
     t0 = time.perf_counter()
-    proc = subprocess.Popen([path, scenario, str(n)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            env={**os.environ, **(env or {}), 'FQ_PHASES': '1'})
+    proc = subprocess.Popen(
+        [path, scenario, str(n)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, **(env or {}), 'FQ_PHASES': '1'},
+    )
     marks = []
 
     def read_marks():
@@ -74,7 +79,7 @@ def trace(path, scenario, n, env, interval):
 
 
 def summarize(samples, marks, ms):
-    mib = 2 ** 20
+    mib = 2**20
     s = {'ms': ms}
     for i, key in ((0, 'rss'), (1, 'fp')):
         s[f'{key}_peak'] = max(f[i] for _, f in samples) / mib if samples else 0.0
@@ -105,8 +110,10 @@ def main():
     for case in a.case:
         scenario, n = case.split(':')
         print(f'\n## {case}\n')
-        print('| бинарник | RSS пик | RSS пик посл. волны | RSS дно посл. волны | '
-              'footprint пик | footprint пик посл. | footprint дно посл. | мс |')
+        print(
+            '| бинарник | RSS пик | RSS пик посл. волны | RSS дно посл. волны | '
+            'footprint пик | footprint пик посл. | footprint дно посл. | мс |'
+        )
         print('|---|---:|---:|---:|---:|---:|---:|---:|')
         sums = set()
         for name, path in bins:
@@ -114,10 +121,19 @@ def main():
             for _ in range(a.repeat):
                 samples, marks, out, ms = trace(path, scenario, n, envs.get(name), a.interval)
                 sums.add(out)
-                raw.setdefault(case, {}).setdefault(name, []).append({'samples': samples, 'marks': marks})
+                raw.setdefault(case, {}).setdefault(name, []).append(
+                    {'samples': samples, 'marks': marks}
+                )
                 runs.append(summarize(samples, marks, ms))
             med = {k: st.median(r[k] for r in runs) for k in runs[0]}
-            keys = ('rss_peak', 'rss_grow_last', 'rss_trough_last', 'fp_peak', 'fp_grow_last', 'fp_trough_last')
+            keys = (
+                'rss_peak',
+                'rss_grow_last',
+                'rss_trough_last',
+                'fp_peak',
+                'fp_grow_last',
+                'fp_trough_last',
+            )
             cells = [f"{med.get(k, float('nan')):.1f}" for k in keys]
             print(f"| {name} | " + ' | '.join(cells) + f" | {med['ms']:.0f} |")
         if len(sums) != 1:

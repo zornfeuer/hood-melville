@@ -287,18 +287,22 @@ target_link_libraries(app PRIVATE hood_melville::fqueue)
 ## Запуск
 
 Нужны `cmake`, C/C++-компилятор, Rust (stable; nightly с `miri` — для
-`rust-miri`), [`just`](https://github.com/casey/just), Python 3.
+`rust-miri`), Zig 0.16, [`just`](https://github.com/casey/just), Python 3,
+[`uv`](https://github.com/astral-sh/uv) (для `just lint`: закреплённые версии
+clang-format, clang-tidy, ruff, shellcheck, actionlint).
 
 ```
-just test                    # C- и Rust-тесты
+just test                    # тесты C, Rust и Zig
+just lint                    # все форматтеры и линтеры, как в CI (CONTRIBUTING.md)
+just fmt                     # привести форматирование всех исходников к принятому
 just c-asan                  # C-тесты под ASan/UBSan
 just c-tsan                  # многопоточные C-тесты под ThreadSanitizer
 just c-leaks                 # C-тесты под leaks (macOS)
 just c-install-check         # установка C-библиотеки и пример через find_package
-just rust-lint               # rustfmt + clippy::pedantic
+just rust-lint               # rustfmt + clippy::pedantic (все цели, с пулом и без)
 just rust-miri               # Rust-тесты под Miri
 just zig-test                # Zig-тесты (zig build test)
-just zig-lint                # zig fmt --check
+just zig-lint                # zig fmt --check + zig ast-check
 just bench-quick-save        # быстрый контроль: сохранить базу (~полминуты)
 just bench-quick             # быстрый контроль: что изменилось против базы (инструкции, такты)
 just bench-compare-layouts   # сравнение C и Rust (несколько минут)

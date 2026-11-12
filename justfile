@@ -2,8 +2,10 @@ default: test
 
 # --- C -----------------------------------------------------------------------
 
+# Сборки проекта — с -Werror (HOOD_MELVILLE_WERROR): предупреждение в
+# библиотеке, тестах или нагрузке ломает сборку, как в CI.
 c-build:
-    cmake -S c -B build/c > /dev/null
+    cmake -S c -B build/c -DHOOD_MELVILLE_WERROR=ON > /dev/null
     cmake --build build/c
 
 c-test: c-build
@@ -12,7 +14,7 @@ c-test: c-build
 
 # Многопоточные C-тесты (fqueue_sync) под ThreadSanitizer.
 c-tsan:
-    cmake -S c -B build/c-tsan -DCMAKE_BUILD_TYPE=Debug \
+    cmake -S c -B build/c-tsan -DCMAKE_BUILD_TYPE=Debug -DHOOD_MELVILLE_WERROR=ON \
         -DCMAKE_C_FLAGS="-fsanitize=thread" -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" > /dev/null
     cmake --build build/c-tsan --target fqueue_test
@@ -20,7 +22,7 @@ c-tsan:
 
 # C-тесты под AddressSanitizer и UBSan.
 c-asan:
-    cmake -S c -B build/c-asan -DCMAKE_BUILD_TYPE=Debug \
+    cmake -S c -B build/c-asan -DCMAKE_BUILD_TYPE=Debug -DHOOD_MELVILLE_WERROR=ON \
         -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
         -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" > /dev/null
@@ -49,11 +51,23 @@ c-install-check:
 rust-test:
     cd rust && cargo test
     cd rust && cargo test --features pool
+    cd rust && cargo test --release
+    cd rust && cargo test --release --features pool
 
+# Все цели крейта (библиотека, тесты, примеры-нагрузки, criterion) без пула и
+# с ним, и микротест bench/snapshot/rd.rs (собирается как пример, как в
+# bench/snapshot/run.sh).
 rust-lint:
-    cd rust && cargo fmt --check
-    cd rust && cargo clippy --all-targets -- -W clippy::pedantic -D warnings
-    cd rust && cargo clippy --all-targets --features pool -- -W clippy::pedantic -D warnings
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd rust
+    cargo fmt --check
+    rustfmt --check --edition 2024 ../bench/snapshot/rd.rs
+    cargo clippy --all-targets -- -W clippy::pedantic -D warnings
+    cargo clippy --all-targets --features pool -- -W clippy::pedantic -D warnings
+    cp ../bench/snapshot/rd.rs examples/zz_snapshot_rd.rs
+    trap 'rm -f examples/zz_snapshot_rd.rs' EXIT
+    cargo clippy --example zz_snapshot_rd -- -W clippy::pedantic -D warnings
 
 # Тесты под Miri: проверка unsafe в rust/src/node.rs (и pool.rs) на UB и утечки
 # (Stacked Borrows для всех тестов, Tree Borrows — для юнит-тестов).
@@ -68,13 +82,93 @@ rust-miri:
 zig-test:
     cd zig && zig build --global-cache-dir .zig-cache-global test
 
+# Форматирование и ast-check каждого файла: компилятор Zig разбирает только
+# используемый код, ast-check находит ошибки и в остальном.
 zig-lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
     zig fmt --check zig/
+    git ls-files 'zig/*.zig' | while read -r f; do zig ast-check "$f"; done
 
 zig-build:
     cd zig && zig build --global-cache-dir .zig-cache-global -Doptimize=ReleaseFast -Dcpu=native
 
 test: c-test rust-test zig-test
+
+# --- Форматирование и линтеры ------------------------------------------------
+# Все исходники: библиотеки, тесты, нагрузки, скрипты. Версии инструментов
+# закреплены (uvx), поэтому локально и в CI проверяют одни и те же.
+
+clang_format := "uvx --from clang-format==23.1.5 clang-format"
+clang_tidy := "uvx --from clang-tidy==23.1.4 clang-tidy"
+ruff := "uvx ruff@0.17.4"
+shellcheck := "uvx --from shellcheck-py==0.11.0.1 shellcheck"
+actionlint := "uvx --from actionlint-py==1.7.12.25 actionlint"
+
+# Все проверки форматирования и линтеры (задача lint в CI).
+lint: c-lint rust-lint zig-lint py-lint misc-lint
+
+# Привести форматирование всех исходников к принятому.
+fmt:
+    git ls-files '*.c' '*.h' '*.cxx' '*.hpp' | xargs {{ clang_format }} -i
+    cd rust && cargo fmt
+    rustfmt --edition 2024 bench/snapshot/rd.rs
+    zig fmt zig/
+    {{ ruff }} format bench/
+    just --fmt --unstable
+
+c-lint: c-format-check c-warnings c-tidy
+
+c-format-check:
+    git ls-files '*.c' '*.h' '*.cxx' '*.hpp' | xargs {{ clang_format }} --dry-run --Werror
+
+# Все цели CMake с -Werror (в том числе варианты нагрузки с пулом) и
+# инструменты bench/alloc, bench/snapshot (библиотеки для подстановки в macOS,
+# собираются вне CMake).
+c-warnings:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cmake -S c -B build/c-werror -DHOOD_MELVILLE_WERROR=ON > /dev/null
+    cmake --build build/c-werror
+    if [[ "$(uname)" == Darwin ]]; then
+        jp=$(brew --prefix jemalloc)
+        for f in bench/alloc/*.c bench/snapshot/*.c; do
+            cc -std=c17 -Wall -Wextra -Wpedantic -Werror -fsyntax-only -Ic/include -I"$jp/include" \
+                -DJEMALLOC_DYLIB='"libjemalloc.dylib"' "$f"
+        done
+    fi
+
+# clang-tidy (.clang-tidy) по всем единицам трансляции CMake — библиотека,
+# тесты, нагрузки — и по инструментам bench/ на macOS.
+c-tidy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cmake -S c -B build/c-tidy -DHOOD_MELVILLE_WERROR=ON > /dev/null
+    extra=()
+    if [[ "$(uname)" == Darwin ]]; then
+        extra=(--extra-arg=-isysroot --extra-arg="$(xcrun --show-sdk-path)")
+    fi
+    files=()
+    while read -r f; do files+=("$f"); done < <(python3 -c '
+    import json
+    cmds = json.load(open("build/c-tidy/compile_commands.json"))
+    print("\n".join(sorted({c["file"] for c in cmds if "/_deps/" not in c["file"]})))')
+    {{ clang_tidy }} -p build/c-tidy --quiet "${extra[@]}" "${files[@]}"
+    if [[ "$(uname)" == Darwin ]]; then
+        jp=$(brew --prefix jemalloc)
+        {{ clang_tidy }} --quiet "${extra[@]}" bench/alloc/*.c bench/snapshot/*.c \
+            -- -std=c17 -Ic/include -I"$jp/include" -DJEMALLOC_DYLIB='"libjemalloc.dylib"'
+    fi
+
+py-lint:
+    {{ ruff }} check bench/
+    {{ ruff }} format --check bench/
+
+# Скрипты, justfile и workflow CI.
+misc-lint:
+    {{ shellcheck }} bench/snapshot/run.sh
+    {{ actionlint }}
+    just --fmt --check --unstable
 
 # --- Сравнение C, Rust и Zig (методика — docs/benchmarks.md) ----------------------
 
@@ -109,9 +203,9 @@ bench-quick names="C,C-pool,Rust,Rust-pool,Zig,Zig-pool" rounds="10" *flags="": 
     #!/usr/bin/env bash
     set -euo pipefail
     bins=()
-    IFS=, read -ra names <<< "{{names}}"
+    IFS=, read -ra names <<< "{{ names }}"
     for n in "${names[@]}"; do bins+=("$n=build/quick/$n"); done
-    python3 -I bench/quick.py --rounds {{rounds}} {{flags}} "${bins[@]}"
+    python3 -I bench/quick.py --rounds {{ rounds }} {{ flags }} "${bins[@]}"
 
 # То же, и сохранить результат как новую базу.
 bench-quick-save names="C,C-pool,Rust,Rust-pool,Zig,Zig-pool" rounds="10": (bench-quick names rounds "--save")
@@ -131,7 +225,7 @@ bench_layouts := "16 32 64 128"
 
 # Быстрое сравнение текущих сборок (одна раскладка).
 bench-compare rounds="20": bench-build
-    python3 -I bench/compare.py --rounds {{rounds}} --out bench-results/compare {{bench_cases}} \
+    python3 -I bench/compare.py --rounds {{ rounds }} --out bench-results/compare {{ bench_cases }} \
         C=build/c/fqueue_bench Rust=rust/target/max/examples/fqueue_bench Zig=zig/zig-out/bin/fqueue_bench
 
 # Zig-нагрузка как LLVM bitcode (sync: true/false): в Zig 0.16 нет опций
@@ -141,8 +235,8 @@ bench-compare rounds="20": bench-build
 zig-layout-bc sync out pool="false":
     #!/usr/bin/env bash
     set -euo pipefail
-    out=$(cd "$(dirname "{{out}}")" && pwd)/$(basename "{{out}}")
-    printf 'pub const sync = %s;\npub const pool = %s;\n' {{sync}} {{pool}} > "$out.options.zig"
+    out=$(cd "$(dirname "{{ out }}")" && pwd)/$(basename "{{ out }}")
+    printf 'pub const sync = %s;\npub const pool = %s;\n' {{ sync }} {{ pool }} > "$out.options.zig"
     cd zig && zig build-exe -O ReleaseFast -mcpu native -lc --global-cache-dir .zig-cache-global \
         --dep fqueue --dep bench_options -Mroot=bench/fqueue_bench.zig -Mfqueue=src/root.zig \
         -Mbench_options="$out.options.zig" -femit-llvm-bc="$out" -fno-emit-bin
@@ -151,10 +245,10 @@ zig-layout-bc sync out pool="false":
 bench-layouts label="cur":
     #!/usr/bin/env bash
     set -euo pipefail
-    dir=build/bench-layout/{{label}}
+    dir=build/bench-layout/{{ label }}
     mkdir -p "$dir"
     just zig-layout-bc false "$dir/zig.bc"
-    for a in {{bench_layouts}}; do
+    for a in {{ bench_layouts }}; do
         clang -O3 -mcpu=native -falign-functions=$a -falign-loops=$a "$dir/zig.bc" -o "$dir/Zig-al$a" 2>/dev/null
         cc -O3 -march=native -flto -DNDEBUG -Ic/include -falign-functions=$a -falign-loops=$a \
             c/bench/fqueue_bench.c c/src/fqueue.c -o "$dir/C-al$a"
@@ -170,10 +264,10 @@ bench-layouts label="cur":
 bench-layouts-sync label="cur":
     #!/usr/bin/env bash
     set -euo pipefail
-    dir=build/bench-layout/{{label}}
+    dir=build/bench-layout/{{ label }}
     mkdir -p "$dir"
     just zig-layout-bc true "$dir/zig-sync.bc"
-    for a in {{bench_layouts}}; do
+    for a in {{ bench_layouts }}; do
         clang -O3 -mcpu=native -falign-functions=$a -falign-loops=$a "$dir/zig-sync.bc" -o "$dir/Zig-sync-al$a" 2>/dev/null
         cc -O3 -march=native -flto -DNDEBUG -DFQUEUE_BENCH_SYNC -Ic/include -falign-functions=$a -falign-loops=$a \
             c/bench/fqueue_bench.c c/src/fqueue.c -o "$dir/C-sync-al$a"
@@ -189,11 +283,11 @@ bench-layouts-sync label="cur":
 bench-layouts-pool label="cur":
     #!/usr/bin/env bash
     set -euo pipefail
-    dir=build/bench-layout/{{label}}
+    dir=build/bench-layout/{{ label }}
     mkdir -p "$dir"
     just zig-layout-bc false "$dir/zig-pool.bc" true
     just zig-layout-bc true "$dir/zig-pool-sync.bc" true
-    for a in {{bench_layouts}}; do
+    for a in {{ bench_layouts }}; do
         for v in pool pool-sync; do
             clang -O3 -mcpu=native -falign-functions=$a -falign-loops=$a "$dir/zig-$v.bc" -o "$dir/Zig-$v-al$a" 2>/dev/null
         done
@@ -217,10 +311,10 @@ bench-compare-sync rounds="8": (bench-layouts "cur") (bench-layouts-sync "cur")
     set -euo pipefail
     bins=()
     for impl in C C-sync Rust Rust-sync Zig Zig-sync; do
-        for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
+        for a in {{ bench_layouts }}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
     done
-    python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-sync \
-        {{bench_cases}} "${bins[@]}"
+    python3 -I bench/compare.py --settle 120 --rounds {{ rounds }} --out bench-results/compare-sync \
+        {{ bench_cases }} "${bins[@]}"
 
 # Сравнение C, Rust и Zig по всем вариантам раскладки — основной режим для выводов.
 bench-compare-layouts rounds="8": (bench-layouts "cur")
@@ -228,10 +322,10 @@ bench-compare-layouts rounds="8": (bench-layouts "cur")
     set -euo pipefail
     bins=()
     for impl in C Rust Zig; do
-        for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
+        for a in {{ bench_layouts }}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
     done
-    python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-layouts \
-        {{bench_cases}} "${bins[@]}"
+    python3 -I bench/compare.py --settle 120 --rounds {{ rounds }} --out bench-results/compare-layouts \
+        {{ bench_cases }} "${bins[@]}"
 
 # C, Rust и Zig на операциях на месте, по 4 раскладкам.
 bench-compare-mut rounds="8": (bench-layouts "cur")
@@ -239,10 +333,10 @@ bench-compare-mut rounds="8": (bench-layouts "cur")
     set -euo pipefail
     bins=()
     for impl in C Rust Zig; do
-        for a in {{bench_layouts}}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
+        for a in {{ bench_layouts }}; do bins+=("$impl/al$a=build/bench-layout/cur/$impl-al$a"); done
     done
-    python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/compare-mut \
-        {{bench_cases_mut}} "${bins[@]}"
+    python3 -I bench/compare.py --settle 120 --rounds {{ rounds }} --out bench-results/compare-mut \
+        {{ bench_cases_mut }} "${bins[@]}"
 
 # --- Параллельная нагрузка (#6) -----------------------------------------------
 
@@ -273,7 +367,7 @@ bench-par-build: zig-build
 
 # Масштабирование по числу потоков и доле операций над общими версиями.
 bench-par rounds="5" modes="pool,threads": bench-par-build
-    python3 -I bench/parallel.py --settle 60 --rounds {{rounds}} --modes {{modes}} \
+    python3 -I bench/parallel.py --settle 60 --rounds {{ rounds }} --modes {{ modes }} \
         --out bench-results/parallel C=build/par/C Rust=build/par/Rust Zig=build/par/Zig
 
 # --- Аллокаторы (#8) ----------------------------------------------------------
@@ -302,11 +396,11 @@ bench-alloc rounds="6" variant="": alloc-build (bench-layouts "alloc") (bench-la
     set -euo pipefail
     mi=$(brew --prefix mimalloc)/lib/libmimalloc.dylib
     je=$PWD/build/alloc/jemalloc_interpose.dylib
-    v="{{variant}}"
+    v="{{ variant }}"
     bins=(); envs=()
     for impl in C Rust Zig; do
         for al in sys mi je pool; do
-            for a in {{bench_layouts}}; do
+            for a in {{ bench_layouts }}; do
                 n="$impl-$al/al$a"
                 case $al in
                     pool) bins+=("$n=build/bench-layout/alloc/$impl-pool$v-al$a") ;;
@@ -319,8 +413,8 @@ bench-alloc rounds="6" variant="": alloc-build (bench-layouts "alloc") (bench-la
             done
         done
     done
-    if [ -z "$v" ]; then cases="{{bench_cases_alloc}}"; else cases="{{bench_cases}}"; fi
-    python3 -I bench/compare.py --settle 60 --rounds {{rounds}} --out bench-results/alloc-single$v \
+    if [ -z "$v" ]; then cases="{{ bench_cases_alloc }}"; else cases="{{ bench_cases }}"; fi
+    python3 -I bench/compare.py --settle 60 --rounds {{ rounds }} --out bench-results/alloc-single$v \
         "${envs[@]}" $cases "${bins[@]}"
     python3 -I bench/alloc_report.py bench-results/alloc-single$v/compare.json
 
@@ -338,11 +432,11 @@ bench-wave n="2000000": alloc-build (bench-layouts "alloc") (bench-layouts-pool 
                "$impl-je=build/bench-layout/alloc/$impl-al64" "$impl-pool=build/bench-layout/alloc/$impl-pool-al64")
         envs+=(--env "$impl-mi:DYLD_INSERT_LIBRARIES=$mi" --env "$impl-je:DYLD_INSERT_LIBRARIES=$je")
     done
-    python3 -I bench/memtrace.py --repeat 3 --case wave:{{n}} --out bench-results/wave.json "${envs[@]}" "${bins[@]}"
-    echo; echo "обращения к системному аллокатору (wave {{n}}):"
+    python3 -I bench/memtrace.py --repeat 3 --case wave:{{ n }} --out bench-results/wave.json "${envs[@]}" "${bins[@]}"
+    echo; echo "обращения к системному аллокатору (wave {{ n }}):"
     for impl in C Rust Zig; do
         for v in "" "-pool"; do
-            echo "$impl$v: $(DYLD_INSERT_LIBRARIES=$PWD/build/alloc/count.dylib build/bench-layout/alloc/$impl$v-al64 wave {{n}} 2>&1 >/dev/null | grep alloc-calls)"
+            echo "$impl$v: $(DYLD_INSERT_LIBRARIES=$PWD/build/alloc/count.dylib build/bench-layout/alloc/$impl$v-al64 wave {{ n }} 2>&1 >/dev/null | grep alloc-calls)"
         done
     done
 
@@ -363,7 +457,7 @@ bench-alloc-par rounds="5": alloc-build bench-par-build
             esac
         done
     done
-    python3 -I bench/parallel.py --settle 60 --rounds {{rounds}} --modes pool \
+    python3 -I bench/parallel.py --settle 60 --rounds {{ rounds }} --modes pool \
         --shares 0,1,5,50 --threads 1,4,10 --readers 0,1,4,9 \
         --out bench-results/alloc-par "${envs[@]}" "${bins[@]}"
 
@@ -373,8 +467,8 @@ bench-ab-layouts a b impl rounds="8":
     #!/usr/bin/env bash
     set -euo pipefail
     bins=()
-    for label in {{a}} {{b}}; do
-        for al in {{bench_layouts}}; do bins+=("$label/al$al=build/bench-layout/$label/{{impl}}-al$al"); done
+    for label in {{ a }} {{ b }}; do
+        for al in {{ bench_layouts }}; do bins+=("$label/al$al=build/bench-layout/$label/{{ impl }}-al$al"); done
     done
-    python3 -I bench/compare.py --settle 120 --rounds {{rounds}} --out bench-results/ab-{{a}}-{{b}}-{{impl}} \
-        {{bench_cases}} "${bins[@]}"
+    python3 -I bench/compare.py --settle 120 --rounds {{ rounds }} --out bench-results/ab-{{ a }}-{{ b }}-{{ impl }} \
+        {{ bench_cases }} "${bins[@]}"

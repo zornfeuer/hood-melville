@@ -2,12 +2,15 @@
 // Rust-двойник: rust/examples/fqueue_bench.rs —
 // сценарии и контрольная сумма должны совпадать один в один.
 //
-// Использование: fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut|wave> <N>
-// fill_mut, mixed_mut — те же истории через fqueue_push_in_place /
-// fqueue_pop_in_place (отдельный бенчмарк, `just bench-compare-mut`).
-// Печатает контрольную сумму извлечённых значений (зависит от порядка).
-// С FQ_PHASES=1 печатает в stderr длительность фаз (build/drain/destroy).
+// Использование: fqueue_bench
+// <fill|mixed|persistent|branching|fill_mut|mixed_mut|wave> <N> fill_mut,
+// mixed_mut — те же истории через fqueue_push_in_place / fqueue_pop_in_place
+// (отдельный бенчмарк, `just bench-compare-mut`). Печатает контрольную сумму
+// извлечённых значений (зависит от порядка). С FQ_PHASES=1 печатает в stderr
+// длительность фаз (build/drain/destroy).
 
+#include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,19 +33,19 @@
 #ifdef FQUEUE_BENCH_Q
 #define FQUEUE_BENCH_CAT2(a, b) a##_##b
 #define FQUEUE_BENCH_CAT(a, b)  FQUEUE_BENCH_CAT2(a, b)
-#define fqueue               FQUEUE_BENCH_Q
-#define fqueue_init          FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, init)
-#define fqueue_destroy       FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, destroy)
-#define fqueue_is_empty      FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, is_empty)
-#define fqueue_size          FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, size)
-#define fqueue_front         FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, front)
-#define fqueue_push          FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, push)
-#define fqueue_pop           FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, pop)
-#define fqueue_push_in_place FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, push_in_place)
-#define fqueue_pop_in_place  FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, pop_in_place)
+#define fqueue                  FQUEUE_BENCH_Q
+#define fqueue_init             FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, init)
+#define fqueue_destroy          FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, destroy)
+#define fqueue_is_empty         FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, is_empty)
+#define fqueue_size             FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, size)
+#define fqueue_front            FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, front)
+#define fqueue_push             FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, push)
+#define fqueue_pop              FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, pop)
+#define fqueue_push_in_place    FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, push_in_place)
+#define fqueue_pop_in_place     FQUEUE_BENCH_CAT(FQUEUE_BENCH_Q, pop_in_place)
 #endif
 
-static int      phases_on;
+static int phases_on;
 static uint64_t phase_t0;
 
 static uint64_t now_ns(void) {
@@ -55,7 +58,8 @@ static uint64_t now_ns(void) {
 static void phase(const char *name) {
   if (!phases_on) return;
   uint64_t t = now_ns();
-  if (name) fprintf(stderr, "phase %s %.3f ms\n", name, (double)(t - phase_t0) / 1e6);
+  if (name)
+    fprintf(stderr, "phase %s %.3f ms\n", name, (double)(t - phase_t0) / 1e6);
   phase_t0 = t;
 }
 
@@ -85,7 +89,7 @@ static uint64_t mix_front(uint64_t h, const fqueue *q) {
 // освобождается сразу после операции.
 typedef struct {
   fqueue buf[2];
-  int    cur;
+  int cur;
 } linear;
 
 static const fqueue *cur(const linear *l) { return &l->buf[l->cur]; }
@@ -107,8 +111,7 @@ static uint64_t run_fill(int n) {
   uint64_t h = 0;
   linear q = {.cur = 0};
   fqueue_init(&q.buf[0]);
-  for (int i = 0; i < n; ++i)
-    lin_push(&q, i);
+  for (int i = 0; i < n; ++i) lin_push(&q, i);
   phase("build");
   while (!fqueue_is_empty(cur(&q))) {
     h = mix_front(h, cur(&q));
@@ -153,11 +156,9 @@ static uint64_t run_fill_mut(int n) {
   uint64_t h = 0;
   fqueue q;
   fqueue_init(&q);
-  for (int i = 0; i < n; ++i)
-    check(fqueue_push_in_place(&q, i));
+  for (int i = 0; i < n; ++i) check(fqueue_push_in_place(&q, i));
   phase("build");
-  while (!fqueue_is_empty(&q))
-    h = mix(h, pop_value(&q));
+  while (!fqueue_is_empty(&q)) h = mix(h, pop_value(&q));
   phase("drain");
   fqueue_destroy(&q);
   return h;
@@ -174,8 +175,7 @@ static uint64_t run_mixed_mut(int n) {
     h = mix(h, pop_value(&q));
   }
   phase("build");
-  while (!fqueue_is_empty(&q))
-    h = mix(h, pop_value(&q));
+  while (!fqueue_is_empty(&q)) h = mix(h, pop_value(&q));
   phase("drain");
   fqueue_destroy(&q);
   return h;
@@ -192,23 +192,20 @@ static uint64_t run_wave(int n) {
   fqueue q;
   fqueue_init(&q);
   for (int w = 0; w < WAVES; ++w) {
-    while (fqueue_size(&q) < (size_t)n)
-      check(fqueue_push_in_place(&q, i++));
+    while (fqueue_size(&q) < (size_t)n) check(fqueue_push_in_place(&q, i++));
     phase("grow");
-    while (fqueue_size(&q) > (size_t)(n / 100))
-      h = mix(h, pop_value(&q));
+    while (fqueue_size(&q) > (size_t)(n / 100)) h = mix(h, pop_value(&q));
     phase("shrink");
   }
-  while (!fqueue_is_empty(&q))
-    h = mix(h, pop_value(&q));
+  while (!fqueue_is_empty(&q)) h = mix(h, pop_value(&q));
   fqueue_destroy(&q);
   return h;
 }
 
 typedef struct {
   fqueue *items;
-  size_t  len;
-  size_t  cap;
+  size_t len;
+  size_t cap;
 } versions;
 
 // Место под следующую версию; указатели на элементы после вызова могут
@@ -216,8 +213,9 @@ typedef struct {
 static fqueue *next_slot(versions *v) {
   if (v->len == v->cap) {
     v->cap = v->cap ? v->cap * 2 : 1024;
-    v->items = realloc(v->items, v->cap * sizeof *v->items);
-    if (!v->items) abort();
+    fqueue *items = realloc(v->items, v->cap * sizeof *v->items);
+    if (!items) abort();
+    v->items = items;
   }
   return &v->items[v->len];
 }
@@ -237,8 +235,7 @@ static void keep_pop(versions *v) {
 }
 
 static void destroy(versions *v) {
-  for (size_t k = 0; k < v->len; ++k)
-    fqueue_destroy(&v->items[k]);
+  for (size_t k = 0; k < v->len; ++k) fqueue_destroy(&v->items[k]);
   free(v->items);
 }
 
@@ -305,13 +302,27 @@ static uint64_t run_branching(int n) {
   return h;
 }
 
+// Целое из аргумента командной строки: -1, если это не число в [0, INT_MAX].
+static int parse_arg(const char *s) {
+  char *end;
+  errno = 0;
+  long v = strtol(s, &end, 10);
+  if (errno || end == s || *end || v < 0 || v > INT_MAX) return -1;
+  return (int)v;
+}
 int main(int argc, char **argv) {
   if (argc != 3) {
-    fprintf(stderr, "usage: %s <fill|mixed|persistent|branching|fill_mut|mixed_mut|wave> <N>\n",
+    fprintf(stderr,
+            "usage: %s "
+            "<fill|mixed|persistent|branching|fill_mut|mixed_mut|wave> <N>\n",
             argv[0]);
     return 2;
   }
-  int n = atoi(argv[2]);
+  int n = parse_arg(argv[2]);
+  if (n < 0) {
+    fprintf(stderr, "%s: bad N: %s\n", argv[0], argv[2]);
+    return 2;
+  }
   const char *ph = getenv("FQ_PHASES");
   phases_on = ph && strcmp(ph, "1") == 0;
   phase(NULL);

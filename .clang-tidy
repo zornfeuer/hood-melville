@@ -1,0 +1,55 @@
+# Lints for all C and C++ sources built by CMake (library, tests, benchmarks).
+# Checked by `just lint` and CI with a pinned clang-tidy (see justfile).
+# Disabled checks contradict C idioms used on purpose (assignment in a
+# condition, short names in tight code, unbraced one-line ifs, implicit bool
+# conversion of pointers and counts, bitwise operations on int, malloc
+# without a cast, unchecked fprintf, #if defined chains with #elif), the
+# style of Catch2 tests (static test registration, free functions instead of
+# anonymous namespaces, optional results dereferenced after a REQUIRE,
+# recursive exhaustive enumeration, size() == 0 checked next to empty() on
+# purpose), C11 Annex K (not available in glibc or
+# libSystem), exit/getenv in single-threaded main or the public ABI (enum
+# size).
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-assignment-in-if-condition,
+  -bugprone-assignment-in-selection-statement,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-signed-bitwise,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-throwing-static-initialization,
+  -bugprone-unchecked-optional-access,
+  -cert-err33-c,
+  -cert-err58-cpp,
+  -cert-exp45-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -concurrency-mt-unsafe,
+  -misc-const-correctness,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -misc-non-private-member-variables-in-classes,
+  -misc-use-anonymous-namespace,
+  -performance-enum-size,
+  -portability-avoid-pragma-once,
+  -readability-braces-around-statements,
+  -readability-container-size-empty,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion,
+  -readability-inconsistent-ifelse-braces,
+  -readability-isolate-declaration,
+  -readability-magic-numbers,
+  -readability-math-missing-parentheses,
+  -readability-trailing-comma,
+  -readability-use-concise-preprocessor-directives,
+  -readability-uppercase-literal-suffix
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'c/(include|tests|bench)/'

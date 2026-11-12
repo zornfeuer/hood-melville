@@ -42,8 +42,7 @@ int main(void) {
   strq_iter_init(&it, &s);
   const char *w;
   fqueue_status st;
-  while ((st = strq_iter_next(&it, &w)) == FQUEUE_OK)
-    printf("%s ", w);
+  while ((st = strq_iter_next(&it, &w)) == FQUEUE_OK) printf("%s ", w);
   strq_iter_destroy(&it);
   check(st == FQUEUE_EMPTY ? FQUEUE_OK : st);
   printf("\n");

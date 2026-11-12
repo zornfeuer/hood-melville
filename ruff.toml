@@ -1,0 +1,10 @@
+# Lint and formatting of the Python benchmark scripts (bench/*.py).
+# Checked by `just lint` and CI with a pinned ruff (see justfile).
+line-length = 100
+target-version = "py39"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[format]
+quote-style = "preserve"

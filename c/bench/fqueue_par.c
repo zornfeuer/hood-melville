@@ -11,6 +11,8 @@
 //     писатель и R читателей снимков (pthreads). Печатает контрольную сумму
 //     писателя, его время (нс), число прочитанных снимков и элементов.
 
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -26,21 +28,22 @@
 
 #include "fqueue.h"
 
-// С -DFQUEUE_BENCH_POOL — то же на fqueue_pooled_sync (пул узлов, docs/pool.md).
+// С -DFQUEUE_BENCH_POOL — то же на fqueue_pooled_sync (пул узлов,
+// docs/pool.md).
 #ifdef FQUEUE_BENCH_POOL
-#define fqueue_sync fqueue_pooled_sync
-#define fqueue_sync_clone fqueue_pooled_sync_clone
-#define fqueue_sync_destroy fqueue_pooled_sync_destroy
-#define fqueue_sync_front fqueue_pooled_sync_front
-#define fqueue_sync_init fqueue_pooled_sync_init
-#define fqueue_sync_iter_destroy fqueue_pooled_sync_iter_destroy
-#define fqueue_sync_iter_init fqueue_pooled_sync_iter_init
-#define fqueue_sync_iter_next fqueue_pooled_sync_iter_next
-#define fqueue_sync_iter fqueue_pooled_sync_iter
-#define fqueue_sync_pop_in_place fqueue_pooled_sync_pop_in_place
-#define fqueue_sync_pop fqueue_pooled_sync_pop
+#define fqueue_sync               fqueue_pooled_sync
+#define fqueue_sync_clone         fqueue_pooled_sync_clone
+#define fqueue_sync_destroy       fqueue_pooled_sync_destroy
+#define fqueue_sync_front         fqueue_pooled_sync_front
+#define fqueue_sync_init          fqueue_pooled_sync_init
+#define fqueue_sync_iter_destroy  fqueue_pooled_sync_iter_destroy
+#define fqueue_sync_iter_init     fqueue_pooled_sync_iter_init
+#define fqueue_sync_iter_next     fqueue_pooled_sync_iter_next
+#define fqueue_sync_iter          fqueue_pooled_sync_iter
+#define fqueue_sync_pop_in_place  fqueue_pooled_sync_pop_in_place
+#define fqueue_sync_pop           fqueue_pooled_sync_pop
 #define fqueue_sync_push_in_place fqueue_pooled_sync_push_in_place
-#define fqueue_sync_push fqueue_pooled_sync_push
+#define fqueue_sync_push          fqueue_pooled_sync_push
 #endif
 
 enum { TASKS = 256, OPS = 40000, SHARED = 64 };
@@ -94,7 +97,8 @@ static uint64_t run_task(uint64_t share, uint64_t t) {
   fqueue_sync_init(&q);
   for (int k = 0; k < OPS; ++k) {
     x = xorshift(x);
-    const fqueue_sync *parent = x % 100 < share ? &shared[(x >> 8) % SHARED] : &q;
+    const fqueue_sync *parent =
+        x % 100 < share ? &shared[(x >> 8) % SHARED] : &q;
     fqueue_sync child;
     int v;
     if (!fqueue_sync_front(parent, &v)) {
@@ -113,16 +117,18 @@ static uint64_t run_task(uint64_t share, uint64_t t) {
   return h;
 }
 
+// Без OpenMP только сообщает об ошибке и *elapsed не пишет.
+// NOLINTNEXTLINE(readability-non-const-parameter)
 static uint64_t run_pool(uint64_t share, int p, uint64_t *elapsed) {
 #ifdef _OPENMP
   // Потоки OpenMP создаются при первой параллельной области — до замера,
   // как пул rayon.
 #pragma omp parallel num_threads(p)
-  {}
+  {
+  }
   uint64_t t0 = now_ns(), h = 0;
 #pragma omp parallel for schedule(dynamic) num_threads(p) reduction(+ : h)
-  for (int t = 0; t < TASKS; ++t)
-    h += run_task(share, (uint64_t)t);
+  for (int t = 0; t < TASKS; ++t) h += run_task(share, (uint64_t)t);
   *elapsed = now_ns() - t0;
   return h;
 #else
@@ -134,7 +140,7 @@ static uint64_t run_pool(uint64_t share, int p, uint64_t *elapsed) {
 
 typedef struct {
   uint64_t share;
-  int      first, step;
+  int first, step;
   uint64_t h;
 } worker;
 
@@ -153,7 +159,8 @@ static uint64_t run_threads(uint64_t share, int p, uint64_t *elapsed) {
   uint64_t t0 = now_ns(), h = 0;
   for (int i = 0; i < p; ++i) {
     workers[i] = (worker){.share = share, .first = i, .step = p};
-    if (pthread_create(&threads[i], NULL, run_worker, &workers[i]) != 0) abort();
+    if (pthread_create(&threads[i], NULL, run_worker, &workers[i]) != 0)
+      abort();
   }
   for (int i = 0; i < p; ++i) {
     pthread_join(threads[i], NULL);
@@ -166,8 +173,8 @@ static uint64_t run_threads(uint64_t share, int p, uint64_t *elapsed) {
 }
 
 static pthread_mutex_t slot_mutex = PTHREAD_MUTEX_INITIALIZER;
-static fqueue_sync     slot;
-static atomic_bool     done;
+static fqueue_sync slot;
+static atomic_bool done;
 
 typedef struct {
   uint64_t snapshots, elements, sum;
@@ -195,18 +202,18 @@ static void *run_reader(void *arg) {
   return NULL;
 }
 
-static uint64_t run_snapshot(int readers, uint64_t *elapsed, uint64_t *snapshots,
-                             uint64_t *elements) {
+static uint64_t run_snapshot(int readers, uint64_t *elapsed,
+                             uint64_t *snapshots, uint64_t *elements) {
   fqueue_sync q;
   fqueue_sync_init(&q);
-  for (int i = 0; i < SNAP_SIZE; ++i)
-    check(fqueue_sync_push_in_place(&q, i));
+  for (int i = 0; i < SNAP_SIZE; ++i) check(fqueue_sync_push_in_place(&q, i));
   fqueue_sync_clone(&slot, &q);
   pthread_t *threads = malloc((size_t)readers * sizeof *threads);
   reader *results = malloc((size_t)readers * sizeof *results);
   if (readers && (!threads || !results)) abort();
   for (int i = 0; i < readers; ++i)
-    if (pthread_create(&threads[i], NULL, run_reader, &results[i]) != 0) abort();
+    if (pthread_create(&threads[i], NULL, run_reader, &results[i]) != 0)
+      abort();
   uint64_t t0 = now_ns(), h = 0;
   for (int k = 0; k < SNAP_PAIRS; ++k) {
     check(fqueue_sync_push_in_place(&q, SNAP_SIZE + k));
@@ -239,15 +246,25 @@ static uint64_t run_snapshot(int readers, uint64_t *elapsed, uint64_t *snapshots
   return h;
 }
 
+// Целое из аргумента командной строки: -1, если это не число в [0, INT_MAX].
+static int parse_arg(const char *s) {
+  char *end;
+  errno = 0;
+  long v = strtol(s, &end, 10);
+  if (errno || end == s || *end || v < 0 || v > INT_MAX) return -1;
+  return (int)v;
+}
+
 static int usage(void) {
-  fprintf(stderr, "usage: fqueue_par share <pool|threads> <share 0..100> <threads>\n"
-                  "       fqueue_par snapshot <readers>\n");
+  fprintf(stderr,
+          "usage: fqueue_par share <pool|threads> <share 0..100> <threads>\n"
+          "       fqueue_par snapshot <readers>\n");
   return 2;
 }
 
 int main(int argc, char **argv) {
   if (argc == 5 && strcmp(argv[1], "share") == 0) {
-    int share = atoi(argv[3]), p = atoi(argv[4]);
+    int share = parse_arg(argv[3]), p = parse_arg(argv[4]);
     if (share < 0 || share > 100 || p <= 0) return usage();
     build_shared();
     uint64_t h, elapsed;
@@ -258,17 +275,17 @@ int main(int argc, char **argv) {
     else
       return usage();
     printf("%llu %llu\n", (unsigned long long)h, (unsigned long long)elapsed);
-    for (int i = 0; i < SHARED; ++i)
-      fqueue_sync_destroy(&shared[i]);
+    for (int i = 0; i < SHARED; ++i) fqueue_sync_destroy(&shared[i]);
     return 0;
   }
   if (argc == 3 && strcmp(argv[1], "snapshot") == 0) {
-    int readers = atoi(argv[2]);
+    int readers = parse_arg(argv[2]);
     if (readers < 0) return usage();
     uint64_t elapsed, snapshots, elements;
     uint64_t h = run_snapshot(readers, &elapsed, &snapshots, &elements);
-    printf("%llu %llu %llu %llu\n", (unsigned long long)h, (unsigned long long)elapsed,
-           (unsigned long long)snapshots, (unsigned long long)elements);
+    printf("%llu %llu %llu %llu\n", (unsigned long long)h,
+           (unsigned long long)elapsed, (unsigned long long)snapshots,
+           (unsigned long long)elements);
     return 0;
   }
   return usage();

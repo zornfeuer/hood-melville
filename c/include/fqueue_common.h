@@ -32,12 +32,16 @@ typedef enum fqueue_status {
 } fqueue_status;
 
 // Human-readable description of a status, e.g. for error messages.
-static inline const char* fqueue_strerror(fqueue_status status) {
+static inline const char *fqueue_strerror(fqueue_status status) {
   switch (status) {
-  case FQUEUE_OK:       return "success";
-  case FQUEUE_EMPTY:    return "queue is empty";
-  case FQUEUE_NOMEM:    return "out of memory";
-  case FQUEUE_OVERFLOW: return "too many elements";
+  case FQUEUE_OK:
+    return "success";
+  case FQUEUE_EMPTY:
+    return "queue is empty";
+  case FQUEUE_NOMEM:
+    return "out of memory";
+  case FQUEUE_OVERFLOW:
+    return "too many elements";
   }
   return "unknown fqueue status";
 }
@@ -45,11 +49,11 @@ static inline const char* fqueue_strerror(fqueue_status status) {
 // Statistics of a node pool (FQUEUE_NODE_POOL instantiations, NAME_pool_stats;
 // docs/pool.md). Approximate while other threads use the pool.
 typedef struct fqueue_pool_stats {
-  size_t   slabs;       // slabs held by the pool
-  size_t   slab_bytes;  // their total size
-  size_t   capacity;    // nodes in them
-  size_t   free;        // of these, free: in thread caches, uncarved, global
-  size_t   live;        // of these, in use: capacity - free
+  size_t slabs;         // slabs held by the pool
+  size_t slab_bytes;    // their total size
+  size_t capacity;      // nodes in them
+  size_t free;          // of these, free: in thread caches, uncarved, global
+  size_t live;          // of these, in use: capacity - free
   uint64_t slab_allocs; // slabs ever allocated (calls to the system allocator)
   uint64_t slab_frees;  // slabs ever returned (by NAME_pool_trim)
   uint64_t spills;      // batches given by thread caches to the global stack

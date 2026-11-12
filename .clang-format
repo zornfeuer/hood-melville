@@ -1,0 +1,6 @@
+# Formatting of all C and C++ sources (library, tests, benchmarks, tools).
+# Checked by `just lint` and CI with a pinned clang-format (see justfile).
+BasedOnStyle: LLVM
+AlignConsecutiveMacros: AcrossComments
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true

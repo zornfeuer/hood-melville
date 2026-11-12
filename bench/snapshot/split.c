@@ -1,8 +1,8 @@
-// LIFO или без переиспользования отдельно для главного потока (строит снимок) и для читателей:
-// SPLIT=LB — главный LIFO, читатели без переиспользования (L/B, первая буква — главный поток).
-// 16-байтовые блоки из общей арены кусками по 64 КБ на поток, свой список
-// свободных у каждого потока (освобождённый чужой блок остаётся у
-// освободившего). Остальное — системный malloc.
+// LIFO или без переиспользования отдельно для главного потока (строит снимок) и
+// для читателей: SPLIT=LB — главный LIFO, читатели без переиспользования (L/B,
+// первая буква — главный поток). 16-байтовые блоки из общей арены кусками по 64
+// КБ на поток, свой список свободных у каждого потока (освобождённый чужой блок
+// остаётся у освободившего). Остальное — системный malloc.
 #include <malloc/malloc.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -14,42 +14,85 @@
 #define CHUNK ((size_t)64 << 10)
 static char *arena;
 static _Atomic size_t used;
-static _Thread_local struct { _Alignas(128) void *free_list; char *cur, *end; int role; char pad[100]; } tl;
+static _Thread_local struct {
+  _Alignas(128) void *free_list;
+  char *cur, *end;
+  int role;
+  char pad[100];
+} tl;
 static _Atomic int nthreads;
-// SPLIT=MR: M — главный поток (строит снимок), R — читатели; L = LIFO, B = без переиспользования.
+// SPLIT=MR: M — главный поток (строит снимок), R — читатели; L = LIFO, B = без
+// переиспользования.
 static char split[3] = "LL";
-__attribute__((constructor)) static void init_split(void) { const char *s = getenv("SPLIT"); if (s) { split[0] = s[0]; split[1] = s[1]; } }
+__attribute__((constructor)) static void init_split(void) {
+  const char *s = getenv("SPLIT");
+  if (s) {
+    split[0] = s[0];
+    split[1] = s[1];
+  }
+}
 static int reuse(void) {
   if (!tl.role) tl.role = ++nthreads == 1 ? 1 : 2;
   return split[tl.role - 1] == 'L';
 }
 #define free_list tl.free_list
-#define cur tl.cur
-#define end tl.end
+#define cur       tl.cur
+#define end       tl.end
 
-static int mine(void *p) { return arena && (char *)p >= arena && (char *)p < arena + ARENA; }
+static int mine(void *p) {
+  return arena && (char *)p >= arena && (char *)p < arena + ARENA;
+}
 static void *my_malloc(size_t n) {
   if (n != 16) return malloc(n);
   if (!arena) {
-    char *a = mmap(NULL, ARENA, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+    char *a = mmap(NULL, ARENA, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
     char *expected = NULL;
-    if (!atomic_compare_exchange_strong((_Atomic(char *) *)&arena, &expected, a)) munmap(a, ARENA);
+    if (!atomic_compare_exchange_strong((_Atomic(char *) *)&arena, &expected,
+                                        a))
+      munmap(a, ARENA);
   }
-  if (free_list) { void *p = free_list; free_list = *(void **)p; return p; }
-  if (cur == end) { size_t o = atomic_fetch_add(&used, CHUNK); if (o + CHUNK > ARENA) abort(); cur = arena + o; end = cur + CHUNK; }
-  void *p = cur; cur += 16; return p;
+  if (free_list) {
+    void *p = free_list;
+    free_list = *(void **)p;
+    return p;
+  }
+  if (cur == end) {
+    size_t o = atomic_fetch_add(&used, CHUNK);
+    if (o + CHUNK > ARENA) abort();
+    cur = arena + o;
+    end = cur + CHUNK;
+  }
+  void *p = cur;
+  cur += 16;
+  return p;
 }
 static void my_free(void *p) {
   if (!p) return;
-  if (!mine(p)) { free(p); return; }
+  if (!mine(p)) {
+    free(p);
+    return;
+  }
   if (!reuse()) return;
-  *(void **)p = free_list; free_list = p;
+  *(void **)p = free_list;
+  free_list = p;
 }
 static void *my_realloc(void *p, size_t n) {
   if (!p || !mine(p)) return realloc(p, n);
-  void *q = my_malloc(n); if (q) { memcpy(q, p, n < 16 ? n : 16); my_free(p); } return q;
+  void *q = my_malloc(n);
+  if (q) {
+    memcpy(q, p, n < 16 ? n : 16);
+    my_free(p);
+  }
+  return q;
 }
-static size_t my_malloc_size(const void *p) { return mine((void *)p) ? 16 : malloc_size(p); }
-__attribute__((used)) static struct { const void *a, *b; } interposers[] __attribute__((section("__DATA,__interpose"))) = {
-    {(const void *)my_malloc, (const void *)malloc}, {(const void *)my_free, (const void *)free},
-    {(const void *)my_realloc, (const void *)realloc}, {(const void *)my_malloc_size, (const void *)malloc_size}};
+static size_t my_malloc_size(const void *p) {
+  return mine((void *)p) ? 16 : malloc_size(p);
+}
+__attribute__((used)) static struct {
+  const void *a, *b;
+} interposers[] __attribute__((section("__DATA,__interpose"))) = {
+    {(const void *)my_malloc, (const void *)malloc},
+    {(const void *)my_free, (const void *)free},
+    {(const void *)my_realloc, (const void *)realloc},
+    {(const void *)my_malloc_size, (const void *)malloc_size}};

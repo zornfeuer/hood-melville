@@ -90,7 +90,8 @@
 #include "fqueue_common.h"
 
 #ifndef FQUEUE_NAME
-#error "define FQUEUE_NAME (the name of the queue type) before including fqueue_template.h"
+#error                                                                         \
+    "define FQUEUE_NAME (the name of the queue type) before including fqueue_template.h"
 #endif
 #ifndef FQUEUE_T
 #error "define FQUEUE_T (the element type) before including fqueue_template.h"
@@ -123,13 +124,13 @@ typedef struct {
   FQUEUE_IMPL_NODE *rfacc;
   FQUEUE_IMPL_NODE *old_front;
   FQUEUE_IMPL_NODE *old_rear;
-  fqueue_impl_len   ok;
+  fqueue_impl_len ok;
 } FQUEUE_IMPL_P(reversing);
 
 typedef struct {
   FQUEUE_IMPL_NODE *acc;
   FQUEUE_IMPL_NODE *rfacc;
-  fqueue_impl_len   ok;
+  fqueue_impl_len ok;
 } FQUEUE_IMPL_P(appending);
 
 typedef struct {
@@ -141,21 +142,21 @@ typedef struct {
 } FQUEUE_IMPL_P(rotation);
 
 typedef struct FQUEUE_NAME {
-  fqueue_impl_len          size;
-  fqueue_impl_len          front_len;
-  fqueue_impl_len          rear_len;
-  FQUEUE_IMPL_NODE        *front;
-  FQUEUE_IMPL_NODE        *rear;
-  FQUEUE_IMPL_P(rotation)  rot;
+  fqueue_impl_len size;
+  fqueue_impl_len front_len;
+  fqueue_impl_len rear_len;
+  FQUEUE_IMPL_NODE *front;
+  FQUEUE_IMPL_NODE *rear;
+  FQUEUE_IMPL_P(rotation) rot;
 } FQUEUE_NAME;
 
 // Initialize *q as an empty queue. Allocates nothing.
-FQUEUE_API void FQUEUE_IMPL_N(init)(FQUEUE_NAME* q);
+FQUEUE_API void FQUEUE_IMPL_N(init)(FQUEUE_NAME *q);
 
 // Initialize *out as another owner of the version `q`: the same contents,
 // all nodes shared, nothing allocated. Cannot fail.
-FQUEUE_API void FQUEUE_IMPL_N(clone)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
-                                     const FQUEUE_NAME* FQUEUE_IMPL_RESTRICT q);
+FQUEUE_API void FQUEUE_IMPL_N(clone)(FQUEUE_NAME *FQUEUE_IMPL_RESTRICT out,
+                                     const FQUEUE_NAME *FQUEUE_IMPL_RESTRICT q);
 
 // Release the nodes owned by *q (shared nodes are freed only when no other
 // version references them). Afterwards *q is uninitialized storage, as after
@@ -163,30 +164,29 @@ FQUEUE_API void FQUEUE_IMPL_N(clone)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
 // storage of *q itself is not freed. Unlike free(), destroying twice is an
 // error — like Rust's drop, and resetting *q measurably slows linear
 // histories (docs/benchmarks.md).
-FQUEUE_API void FQUEUE_IMPL_N(destroy)(FQUEUE_NAME* q);
+FQUEUE_API void FQUEUE_IMPL_N(destroy)(FQUEUE_NAME *q);
 
 // Return true iff the queue contains no elements.
-FQUEUE_API bool FQUEUE_IMPL_N(is_empty)(const FQUEUE_NAME* q);
+FQUEUE_API bool FQUEUE_IMPL_N(is_empty)(const FQUEUE_NAME *q);
 
 // Number of elements in the queue.
-FQUEUE_API size_t FQUEUE_IMPL_N(size)(const FQUEUE_NAME* q);
+FQUEUE_API size_t FQUEUE_IMPL_N(size)(const FQUEUE_NAME *q);
 
 // Front element: write it to *value and return true; if `q` is empty, return
 // false and leave *value untouched.
-FQUEUE_API bool FQUEUE_IMPL_N(front)(const FQUEUE_NAME* q, FQUEUE_T* value);
+FQUEUE_API bool FQUEUE_IMPL_N(front)(const FQUEUE_NAME *q, FQUEUE_T *value);
 
 // Enqueue: initialize *out as `q` with `value` appended to the rear.
 // Fails with FQUEUE_NOMEM, or FQUEUE_OVERFLOW at the length limit.
-FQUEUE_IMPL_NODISCARD FQUEUE_API
-fqueue_status FQUEUE_IMPL_N(push)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
-                                  const FQUEUE_NAME* FQUEUE_IMPL_RESTRICT q,
-                                  FQUEUE_T value);
+FQUEUE_IMPL_NODISCARD FQUEUE_API fqueue_status FQUEUE_IMPL_N(push)(
+    FQUEUE_NAME *FQUEUE_IMPL_RESTRICT out,
+    const FQUEUE_NAME *FQUEUE_IMPL_RESTRICT q, FQUEUE_T value);
 
 // Dequeue: initialize *out as `q` without its front element. Fails with
 // FQUEUE_EMPTY (*out is then not even written) or FQUEUE_NOMEM.
-FQUEUE_IMPL_NODISCARD FQUEUE_API
-fqueue_status FQUEUE_IMPL_N(pop)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
-                                 const FQUEUE_NAME* FQUEUE_IMPL_RESTRICT q);
+FQUEUE_IMPL_NODISCARD FQUEUE_API fqueue_status
+    FQUEUE_IMPL_N(pop)(FQUEUE_NAME *FQUEUE_IMPL_RESTRICT out,
+                       const FQUEUE_NAME *FQUEUE_IMPL_RESTRICT q);
 
 // In-place enqueue: append `value` to *q itself — the same as NAME_push into
 // a new version followed by NAME_destroy of *q, but without copying the
@@ -194,14 +194,14 @@ fqueue_status FQUEUE_IMPL_N(pop)(FQUEUE_NAME* FQUEUE_IMPL_RESTRICT out,
 // not affected. The operation itself is O(1); like NAME_destroy of the old
 // version, it may also free nodes that *q owned alone. Fails with
 // FQUEUE_NOMEM, or FQUEUE_OVERFLOW at the length limit, leaving *q unchanged.
-FQUEUE_IMPL_NODISCARD FQUEUE_API
-fqueue_status FQUEUE_IMPL_N(push_in_place)(FQUEUE_NAME* q, FQUEUE_T value);
+FQUEUE_IMPL_NODISCARD FQUEUE_API fqueue_status
+    FQUEUE_IMPL_N(push_in_place)(FQUEUE_NAME *q, FQUEUE_T value);
 
 // In-place dequeue: remove the front element of *q itself and write it to
 // *value unless `value` is NULL; see NAME_push_in_place. Fails with
 // FQUEUE_EMPTY or FQUEUE_NOMEM, leaving *q and *value unchanged.
-FQUEUE_IMPL_NODISCARD FQUEUE_API
-fqueue_status FQUEUE_IMPL_N(pop_in_place)(FQUEUE_NAME* q, FQUEUE_T* value);
+FQUEUE_IMPL_NODISCARD FQUEUE_API fqueue_status
+    FQUEUE_IMPL_N(pop_in_place)(FQUEUE_NAME *q, FQUEUE_T *value);
 
 // Iterator over the elements of a version, front to back. It owns a clone of
 // the version (which may be destroyed meanwhile) and pops it step by step, so
@@ -213,22 +213,21 @@ typedef struct {
 } FQUEUE_IMPL_N(iter);
 
 // Initialize *it at the front of `q`. Cannot fail, as NAME_clone.
-FQUEUE_API void FQUEUE_IMPL_N(iter_init)(FQUEUE_IMPL_N(iter)* it,
-                                         const FQUEUE_NAME* q);
+FQUEUE_API void FQUEUE_IMPL_N(iter_init)(FQUEUE_IMPL_N(iter) * it,
+                                         const FQUEUE_NAME *q);
 
 // Next element: write it to *value and return FQUEUE_OK; FQUEUE_EMPTY after
 // the last one. FQUEUE_NOMEM leaves *it and *value unchanged, so the step can
 // be retried.
-FQUEUE_IMPL_NODISCARD FQUEUE_API
-fqueue_status FQUEUE_IMPL_N(iter_next)(FQUEUE_IMPL_N(iter)* it,
-                                       FQUEUE_T* value);
+FQUEUE_IMPL_NODISCARD FQUEUE_API fqueue_status
+    FQUEUE_IMPL_N(iter_next)(FQUEUE_IMPL_N(iter) * it, FQUEUE_T *value);
 
 // Release the iterator, at any point of the iteration.
-FQUEUE_API void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter)* it);
+FQUEUE_API void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter) * it);
 
 #ifdef FQUEUE_NODE_POOL
 // Statistics of this instantiation's node pool.
-FQUEUE_API void FQUEUE_IMPL_N(pool_stats)(fqueue_pool_stats* stats);
+FQUEUE_API void FQUEUE_IMPL_N(pool_stats)(fqueue_pool_stats *stats);
 
 // Return every slab of the pool to FQUEUE_FREE if no node is live (every
 // version of this type destroyed); otherwise do nothing. Returns the bytes
@@ -256,7 +255,7 @@ FQUEUE_API size_t FQUEUE_IMPL_N(pool_trim)(void);
 #endif
 #ifdef FQUEUE_MALLOC
 void *FQUEUE_MALLOC(size_t size);
-void  FQUEUE_FREE(void *ptr);
+void FQUEUE_FREE(void *ptr);
 #else
 #define FQUEUE_MALLOC malloc
 #define FQUEUE_FREE   free
@@ -303,11 +302,11 @@ void  FQUEUE_FREE(void *ptr);
 #endif // FQUEUE_IMPL_CONFIGURED
 
 struct FQUEUE_IMPL_NODE {
-  FQUEUE_T                 value;
+  FQUEUE_T value;
 #ifdef FQUEUE_ATOMIC
-  _Atomic uint32_t         refcount;
+  _Atomic uint32_t refcount;
 #else
-  uint32_t                 refcount;
+  uint32_t refcount;
 #endif
   struct FQUEUE_IMPL_NODE *next;
 };
@@ -318,11 +317,12 @@ struct FQUEUE_IMPL_NODE {
 #include "fqueue_pool_impl.h"
 _Static_assert(sizeof(FQUEUE_IMPL_NODE) >= 2 * sizeof(void *),
                "a free pool node holds two pointers");
-static fqueue_impl_npool FQUEUE_IMPL_P(node_pool) = FQUEUE_IMPL_NPOOL_INIT(FQUEUE_IMPL_NODE);
+static fqueue_impl_npool
+    FQUEUE_IMPL_P(node_pool) = FQUEUE_IMPL_NPOOL_INIT(FQUEUE_IMPL_NODE);
 static _Thread_local fqueue_impl_npool_cache *FQUEUE_IMPL_P(node_pool_cache);
 #define FQUEUE_IMPL_NODE_NEW()                                                 \
-  ((FQUEUE_IMPL_NODE *)fqueue_impl_npool_alloc(&FQUEUE_IMPL_P(node_pool),      \
-                                               &FQUEUE_IMPL_P(node_pool_cache)))
+  ((FQUEUE_IMPL_NODE *)fqueue_impl_npool_alloc(                                \
+      &FQUEUE_IMPL_P(node_pool), &FQUEUE_IMPL_P(node_pool_cache)))
 #define FQUEUE_IMPL_NODE_DELETE(n)                                             \
   fqueue_impl_npool_free(&FQUEUE_IMPL_P(node_pool),                            \
                          &FQUEUE_IMPL_P(node_pool_cache), (n))
@@ -335,7 +335,8 @@ size_t FQUEUE_IMPL_N(pool_trim)(void) {
   return fqueue_impl_npool_trim(&FQUEUE_IMPL_P(node_pool));
 }
 #else
-#define FQUEUE_IMPL_NODE_NEW()     ((FQUEUE_IMPL_NODE *)FQUEUE_MALLOC(sizeof(FQUEUE_IMPL_NODE)))
+#define FQUEUE_IMPL_NODE_NEW()                                                 \
+  ((FQUEUE_IMPL_NODE *)FQUEUE_MALLOC(sizeof(FQUEUE_IMPL_NODE)))
 #define FQUEUE_IMPL_NODE_DELETE(n) FQUEUE_FREE(n)
 #endif
 
@@ -360,15 +361,19 @@ static inline bool FQUEUE_IMPL_P(refs_unique)(FQUEUE_IMPL_NODE *n) {
   return atomic_load_explicit(&n->refcount, memory_order_acquire) == 1;
 }
 static inline void FQUEUE_IMPL_P(refs_inc)(FQUEUE_IMPL_NODE *n) {
-  uint32_t old = atomic_fetch_add_explicit(&n->refcount, 1, memory_order_relaxed);
+  uint32_t old =
+      atomic_fetch_add_explicit(&n->refcount, 1, memory_order_relaxed);
   if (FQUEUE_IMPL_UNLIKELY(old >= FQUEUE_IMPL_LIMIT))
-    atomic_store_explicit(&n->refcount, FQUEUE_IMPL_SATURATED, memory_order_relaxed);
+    atomic_store_explicit(&n->refcount, FQUEUE_IMPL_SATURATED,
+                          memory_order_relaxed);
 }
 // True if the reference was the last one.
 static inline bool FQUEUE_IMPL_P(refs_dec)(FQUEUE_IMPL_NODE *n) {
-  uint32_t old = atomic_fetch_sub_explicit(&n->refcount, 1, memory_order_release);
+  uint32_t old =
+      atomic_fetch_sub_explicit(&n->refcount, 1, memory_order_release);
   if (FQUEUE_IMPL_UNLIKELY(old > FQUEUE_IMPL_LIMIT)) {
-    atomic_store_explicit(&n->refcount, FQUEUE_IMPL_SATURATED, memory_order_relaxed);
+    atomic_store_explicit(&n->refcount, FQUEUE_IMPL_SATURATED,
+                          memory_order_relaxed);
     return false;
   }
   if (old != 1) return false;
@@ -432,7 +437,7 @@ static void FQUEUE_IMPL_P(release)(FQUEUE_IMPL_NODE *n) {
 // itself cannot fail. A rotation step allocates at most 2 (REVERSING).
 typedef struct {
   FQUEUE_IMPL_NODE *nodes[2];
-  unsigned          n;
+  unsigned n;
 } FQUEUE_IMPL_P(pool);
 
 // Allocate a new node (refcount=1) on top of `next`: from `pool` if it is not
@@ -441,7 +446,7 @@ typedef struct {
 // leaving the reference with the caller, if allocation fails.
 static FQUEUE_IMPL_ALWAYS_INLINE FQUEUE_IMPL_NODE *
 FQUEUE_IMPL_P(cons)(FQUEUE_T value, FQUEUE_IMPL_NODE *next,
-                    FQUEUE_IMPL_P(pool) *pool) {
+                    FQUEUE_IMPL_P(pool) * pool) {
   FQUEUE_IMPL_NODE *n;
   if (pool) {
     assert(pool->n > 0);
@@ -450,16 +455,17 @@ FQUEUE_IMPL_P(cons)(FQUEUE_T value, FQUEUE_IMPL_NODE *next,
     n = FQUEUE_IMPL_NODE_NEW();
     if (!n) return NULL;
   }
-  n->value    = value;
+  n->value = value;
   FQUEUE_IMPL_P(refs_init)(n);
-  n->next     = next;
+  n->next = next;
   return n;
 }
 
 // Retain all node pointers held by a rotation, based on its current tag.
-static void FQUEUE_IMPL_P(rotation_retain)(const FQUEUE_IMPL_P(rotation) *r) {
+static void FQUEUE_IMPL_P(rotation_retain)(const FQUEUE_IMPL_P(rotation) * r) {
   switch (r->tag) {
-  case FQUEUE_IMPL_IDLE: break;
+  case FQUEUE_IMPL_IDLE:
+    break;
   case FQUEUE_IMPL_REVERSING:
     FQUEUE_IMPL_P(retain)(r->reversing.acc);
     FQUEUE_IMPL_P(retain)(r->reversing.rfacc);
@@ -474,9 +480,10 @@ static void FQUEUE_IMPL_P(rotation_retain)(const FQUEUE_IMPL_P(rotation) *r) {
 }
 
 // Release all node pointers held by a rotation and reset it to IDLE.
-static void FQUEUE_IMPL_P(rotation_release)(FQUEUE_IMPL_P(rotation) *r) {
+static void FQUEUE_IMPL_P(rotation_release)(FQUEUE_IMPL_P(rotation) * r) {
   switch (r->tag) {
-  case FQUEUE_IMPL_IDLE: break;
+  case FQUEUE_IMPL_IDLE:
+    break;
   case FQUEUE_IMPL_REVERSING:
     FQUEUE_IMPL_P(release)(r->reversing.acc);
     FQUEUE_IMPL_P(release)(r->reversing.rfacc);
@@ -492,8 +499,9 @@ static void FQUEUE_IMPL_P(rotation_release)(FQUEUE_IMPL_P(rotation) *r) {
 }
 
 // Make *dst a copy of *src that holds its own references to all shared nodes.
-static void FQUEUE_IMPL_P(copy_into)(FQUEUE_NAME *FQUEUE_IMPL_RESTRICT dst,
-                                     const FQUEUE_NAME *FQUEUE_IMPL_RESTRICT src) {
+static void
+FQUEUE_IMPL_P(copy_into)(FQUEUE_NAME *FQUEUE_IMPL_RESTRICT dst,
+                         const FQUEUE_NAME *FQUEUE_IMPL_RESTRICT src) {
   *dst = *src;
   FQUEUE_IMPL_P(retain)(dst->front);
   FQUEUE_IMPL_P(retain)(dst->rear);
@@ -529,7 +537,7 @@ static FQUEUE_IMPL_NODE *FQUEUE_IMPL_P(advance)(FQUEUE_IMPL_NODE *n) {
 // Returns false, leaving *dst as it was, if allocation fails.
 static FQUEUE_IMPL_ALWAYS_INLINE bool
 FQUEUE_IMPL_P(cons_prepend)(FQUEUE_IMPL_NODE **dst, FQUEUE_T value,
-                            FQUEUE_IMPL_P(pool) *pool) {
+                            FQUEUE_IMPL_P(pool) * pool) {
   FQUEUE_IMPL_NODE *n = FQUEUE_IMPL_P(cons)(value, *dst, pool);
   if (!n) return false;
   *dst = n;
@@ -537,26 +545,26 @@ FQUEUE_IMPL_P(cons_prepend)(FQUEUE_IMPL_NODE **dst, FQUEUE_T value,
 }
 
 static void FQUEUE_IMPL_P(start_rotation)(FQUEUE_NAME *q) {
-  q->rot.tag                 = FQUEUE_IMPL_REVERSING;
+  q->rot.tag = FQUEUE_IMPL_REVERSING;
   // old_front shares front's node list — give old_front its own reference.
   q->rot.reversing.old_front = q->front;
   // old_rear takes ownership of rear; rear pointer is cleared.
-  q->rot.reversing.old_rear  = q->rear; // transfer: rear's ref moves to old_rear
-  q->rear                    = NULL;
-  q->rear_len                = 0;
-  q->rot.reversing.acc       = NULL;
-  q->rot.reversing.rfacc     = NULL;
-  q->rot.reversing.ok        = q->front_len;
+  q->rot.reversing.old_rear = q->rear; // transfer: rear's ref moves to old_rear
+  q->rear = NULL;
+  q->rear_len = 0;
+  q->rot.reversing.acc = NULL;
+  q->rot.reversing.rfacc = NULL;
+  q->rot.reversing.ok = q->front_len;
   FQUEUE_IMPL_P(retain)(q->front);
 }
 
 // Install acc as the new front and reset rotation state.
 static void FQUEUE_IMPL_P(finish_rotation)(FQUEUE_NAME *q) {
   FQUEUE_IMPL_P(release)(q->front);
-  q->front     = q->rot.appending.acc;            // acc ownership moves to front
+  q->front = q->rot.appending.acc; // acc ownership moves to front
   FQUEUE_IMPL_P(release)(q->rot.appending.rfacc); // leftover rfacc (ok == 0)
   q->front_len = q->size - q->rear_len;
-  q->rot.tag   = FQUEUE_IMPL_IDLE;
+  q->rot.tag = FQUEUE_IMPL_IDLE;
 }
 
 // One step of the ongoing rotation, taking new nodes from `pool` unless it is
@@ -564,7 +572,7 @@ static void FQUEUE_IMPL_P(finish_rotation)(FQUEUE_NAME *q) {
 // half-stepped, but every field still owns its reference, so NAME_destroy
 // undoes it.
 static FQUEUE_IMPL_ALWAYS_INLINE bool
-FQUEUE_IMPL_P(rotate_step_from)(FQUEUE_NAME *q, FQUEUE_IMPL_P(pool) *pool) {
+FQUEUE_IMPL_P(rotate_step_from)(FQUEUE_NAME *q, FQUEUE_IMPL_P(pool) * pool) {
   if (q->rot.tag == FQUEUE_IMPL_IDLE) return true;
 
   if (q->rot.tag == FQUEUE_IMPL_REVERSING) {
@@ -587,13 +595,13 @@ FQUEUE_IMPL_P(rotate_step_from)(FQUEUE_NAME *q, FQUEUE_IMPL_P(pool) *pool) {
     // Transition to APPENDING: extract fields before overwriting the union.
     // The step ends here, like σ in docs/proof.md and step_mut in Rust: the
     // first APPENDING step is the next operation's.
-    FQUEUE_IMPL_NODE *acc   = q->rot.reversing.acc;
+    FQUEUE_IMPL_NODE *acc = q->rot.reversing.acc;
     FQUEUE_IMPL_NODE *rfacc = q->rot.reversing.rfacc;
-    fqueue_impl_len   ok    = q->rot.reversing.ok;
-    q->rot.tag             = FQUEUE_IMPL_APPENDING;
-    q->rot.appending.acc   = acc;
+    fqueue_impl_len ok = q->rot.reversing.ok;
+    q->rot.tag = FQUEUE_IMPL_APPENDING;
+    q->rot.appending.acc = acc;
     q->rot.appending.rfacc = rfacc;
-    q->rot.appending.ok    = ok;
+    q->rot.appending.ok = ok;
     // ok == 0: every element left in rfacc has been popped — done.
     if (ok == 0) FQUEUE_IMPL_P(finish_rotation)(q);
     return true;
@@ -611,8 +619,7 @@ FQUEUE_IMPL_P(rotate_step_from)(FQUEUE_NAME *q, FQUEUE_IMPL_P(pool) *pool) {
                                    q->rot.appending.rfacc->value, pool))
     return false;
   q->rot.appending.ok--;
-  q->rot.appending.rfacc =
-      FQUEUE_IMPL_P(advance)(q->rot.appending.rfacc);
+  q->rot.appending.rfacc = FQUEUE_IMPL_P(advance)(q->rot.appending.rfacc);
   if (q->rot.appending.rfacc == NULL || q->rot.appending.ok == 0)
     FQUEUE_IMPL_P(finish_rotation)(q);
   return true;
@@ -632,12 +639,12 @@ static fqueue_status FQUEUE_IMPL_P(fail)(FQUEUE_NAME *out,
 }
 
 void FQUEUE_IMPL_N(init)(FQUEUE_NAME *q) {
-  q->size      = 0;
+  q->size = 0;
   q->front_len = 0;
-  q->rear_len  = 0;
-  q->front     = NULL;
-  q->rear      = NULL;
-  q->rot       = (FQUEUE_IMPL_P(rotation)){ .tag = FQUEUE_IMPL_IDLE };
+  q->rear_len = 0;
+  q->front = NULL;
+  q->rear = NULL;
+  q->rot = (FQUEUE_IMPL_P(rotation)){.tag = FQUEUE_IMPL_IDLE};
 }
 
 void FQUEUE_IMPL_N(clone)(FQUEUE_NAME *FQUEUE_IMPL_RESTRICT out,
@@ -709,9 +716,10 @@ fqueue_status FQUEUE_IMPL_N(pop)(FQUEUE_NAME *FQUEUE_IMPL_RESTRICT out,
 
 // Nodes allocated by one rotate_step_from on rotation `r`; mirrors its
 // branches without changing anything.
-static unsigned FQUEUE_IMPL_P(step_allocs)(const FQUEUE_IMPL_P(rotation) *r) {
+static unsigned FQUEUE_IMPL_P(step_allocs)(const FQUEUE_IMPL_P(rotation) * r) {
   switch (r->tag) {
-  case FQUEUE_IMPL_IDLE: return 0;
+  case FQUEUE_IMPL_IDLE:
+    return 0;
   case FQUEUE_IMPL_REVERSING:
     return 1 + (r->reversing.old_front != NULL);
   case FQUEUE_IMPL_APPENDING:
@@ -720,7 +728,7 @@ static unsigned FQUEUE_IMPL_P(step_allocs)(const FQUEUE_IMPL_P(rotation) *r) {
   return 0;
 }
 
-static bool FQUEUE_IMPL_P(pool_fill)(FQUEUE_IMPL_P(pool) *p, unsigned n) {
+static bool FQUEUE_IMPL_P(pool_fill)(FQUEUE_IMPL_P(pool) * p, unsigned n) {
 #ifdef FQUEUE_NODE_POOL
   // The node pool reserves without allocating: the step allocates the nodes
   // itself, after its frees (fqueue_impl_npool_reserve).
@@ -731,8 +739,7 @@ static bool FQUEUE_IMPL_P(pool_fill)(FQUEUE_IMPL_P(pool) *p, unsigned n) {
   for (p->n = 0; p->n < n; p->n++) {
     p->nodes[p->n] = FQUEUE_IMPL_NODE_NEW();
     if (!p->nodes[p->n]) {
-      while (p->n > 0)
-        FQUEUE_IMPL_NODE_DELETE(p->nodes[--p->n]);
+      while (p->n > 0) FQUEUE_IMPL_NODE_DELETE(p->nodes[--p->n]);
       return false;
     }
   }
@@ -748,11 +755,10 @@ fqueue_status FQUEUE_IMPL_N(push_in_place)(FQUEUE_NAME *q, FQUEUE_T value) {
   bool start = q->rot.tag == FQUEUE_IMPL_IDLE && q->rear_len + 1 > q->front_len;
   FQUEUE_IMPL_P(rotation) r = q->rot;
   if (start)
-    r = (FQUEUE_IMPL_P(rotation)){
-        .tag       = FQUEUE_IMPL_REVERSING,
-        .reversing = {.old_front = q->front,
-                      .old_rear  = rear,
-                      .ok        = q->front_len}};
+    r = (FQUEUE_IMPL_P(rotation)){.tag = FQUEUE_IMPL_REVERSING,
+                                  .reversing = {.old_front = q->front,
+                                                .old_rear = rear,
+                                                .ok = q->front_len}};
   FQUEUE_IMPL_P(pool) pool;
   if (!FQUEUE_IMPL_P(pool_fill)(&pool, FQUEUE_IMPL_P(step_allocs)(&r))) {
     FQUEUE_IMPL_NODE_DELETE(rear); // the reference to q->rear stays with q
@@ -776,20 +782,19 @@ fqueue_status FQUEUE_IMPL_N(push_in_place)(FQUEUE_NAME *q, FQUEUE_T value) {
 fqueue_status FQUEUE_IMPL_N(pop_in_place)(FQUEUE_NAME *q, FQUEUE_T *value) {
   if (q->size == 0) return FQUEUE_EMPTY;
   // The rotation as the step will see it: as in NAME_pop.
-  FQUEUE_IMPL_NODE       *front = q->front; // not NULL in a non-empty queue
-  bool                    start = false;
-  FQUEUE_IMPL_P(rotation) r     = q->rot;
+  FQUEUE_IMPL_NODE *front = q->front; // not NULL in a non-empty queue
+  bool start = false;
+  FQUEUE_IMPL_P(rotation) r = q->rot;
   if (r.tag == FQUEUE_IMPL_REVERSING) {
     r.reversing.ok--;
   } else if (r.tag == FQUEUE_IMPL_APPENDING) {
     r.appending.ok--;
   } else if (q->rear_len > q->front_len - 1) {
     start = true;
-    r     = (FQUEUE_IMPL_P(rotation)){
-            .tag       = FQUEUE_IMPL_REVERSING,
-            .reversing = {.old_front = front->next,
-                          .old_rear  = q->rear,
-                          .ok        = q->front_len - 1}};
+    r = (FQUEUE_IMPL_P(rotation)){.tag = FQUEUE_IMPL_REVERSING,
+                                  .reversing = {.old_front = front->next,
+                                                .old_rear = q->rear,
+                                                .ok = q->front_len - 1}};
   }
   FQUEUE_IMPL_P(pool) pool;
   if (!FQUEUE_IMPL_P(pool_fill)(&pool, FQUEUE_IMPL_P(step_allocs)(&r)))
@@ -824,16 +829,16 @@ bool FQUEUE_IMPL_N(front)(const FQUEUE_NAME *q, FQUEUE_T *value) {
   return true;
 }
 
-void FQUEUE_IMPL_N(iter_init)(FQUEUE_IMPL_N(iter) *it, const FQUEUE_NAME *q) {
+void FQUEUE_IMPL_N(iter_init)(FQUEUE_IMPL_N(iter) * it, const FQUEUE_NAME *q) {
   FQUEUE_IMPL_N(clone)(&it->rest, q);
 }
 
-fqueue_status FQUEUE_IMPL_N(iter_next)(FQUEUE_IMPL_N(iter) *it,
+fqueue_status FQUEUE_IMPL_N(iter_next)(FQUEUE_IMPL_N(iter) * it,
                                        FQUEUE_T *value) {
   return FQUEUE_IMPL_N(pop_in_place)(&it->rest, value);
 }
 
-void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter) *it) {
+void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter) * it) {
   FQUEUE_IMPL_N(destroy)(&it->rest);
 }
 

@@ -1,5 +1,8 @@
 name: ci
 
+# Every job runs the same `just` recipes as a local check (CONTRIBUTING.md),
+# so a green local run and a green CI run mean the same thing.
+
 on:
   push:
     branches: [main]
@@ -7,82 +10,65 @@ on:
   workflow_dispatch:
 
 jobs:
-  c:
-    runs-on: ubuntu-latest
+  # Formatters and linters for all sources: libraries, tests, benchmarks and
+  # scripts. On macOS: the allocator shims in bench/alloc and bench/snapshot
+  # are macOS-only and are checked here too.
+  lint:
+    runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: build and test
-        run: |
-          cmake -S c -B build/c
-          cmake --build build/c
-          ./build/c/fqueue_test --skip-benchmarks
-          ./build/c/fqueue_limits_test
-      - name: test under ASan/UBSan
-        run: |
-          cmake -S c -B build/c-asan -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-          cmake --build build/c-asan --target fqueue_test fqueue_limits_test
-          ./build/c-asan/fqueue_test --skip-benchmarks
-          ./build/c-asan/fqueue_limits_test
-      - name: multithreaded tests under ThreadSanitizer
-        run: |
-          cmake -S c -B build/c-tsan -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_FLAGS="-fsanitize=thread" -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
-          cmake --build build/c-tsan --target fqueue_test
-          ./build/c-tsan/fqueue_test "[sync]"
-      - name: install as a package and use it
-        run: |
-          cmake -S c -B build/c-pkg -DBUILD_SHARED_LIBS=ON -DHOOD_MELVILLE_BUILD_TESTS=OFF \
-            -DHOOD_MELVILLE_BUILD_BENCH=OFF -DHOOD_MELVILLE_INSTALL=ON
-          cmake --build build/c-pkg
-          cmake --install build/c-pkg --prefix "$PWD/build/c-prefix"
-          cmake -S c/examples/consumer -B build/consumer -DCMAKE_PREFIX_PATH="$PWD/build/c-prefix"
-          cmake --build build/consumer
-          ./build/consumer/consumer
-
-  rust:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - uses: extractions/setup-just@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -W clippy::pedantic -D warnings
-      - run: cargo test
-      - run: cargo test --release
-
-  miri:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri, rust-src
-      - run: cargo miri test --lib --test scenarios --test model --test branching --test sync
-      - run: cargo miri test --lib
-        env:
-          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-strict-provenance
-
-  zig:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: zig
-    steps:
-      - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig fmt --check .
-      - run: zig build test
-      - run: zig build -Doptimize=ReleaseFast
+      - run: brew install jemalloc
+      - run: just lint
+
+  c:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: extractions/setup-just@v4
+      - run: just c-test
+      - run: just c-asan
+      - run: just c-tsan
+      - if: runner.os == 'macOS'
+        run: just c-leaks
+      - run: just c-install-check
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: extractions/setup-just@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: just rust-test
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: extractions/setup-just@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - run: just rust-miri
+
+  zig:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: extractions/setup-just@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: just zig-test
+      - run: just zig-build

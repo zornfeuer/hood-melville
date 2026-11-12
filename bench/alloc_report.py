@@ -14,6 +14,7 @@
 
 usage: alloc_report.py bench-results/alloc-single/compare.json
 """
+
 import json
 import os
 import random
@@ -27,7 +28,8 @@ LANGS = ['C', 'Rust', 'Zig']
 
 
 def main():
-    raw = json.load(open(sys.argv[1]))
+    with open(sys.argv[1]) as f:
+        raw = json.load(f)
     rng = random.Random(1)
     cases = list(raw)
     pooled = {}
@@ -36,7 +38,7 @@ def main():
             pooled.setdefault(case, {}).setdefault(name.split('/')[0], []).extend(runs)
     # Аллокаторы — в порядке появления в именах; первый — база (обычно sys).
     ALLOCS = list(dict.fromkeys(p.split('-', 1)[1] for p in pooled[cases[0]]))
-    pairs = [f'{l}-{a}' for l in LANGS for a in ALLOCS]
+    pairs = [f'{lang}-{a}' for lang in LANGS for a in ALLOCS]
     pairs = [p for p in pairs if p in pooled[cases[0]]]
 
     def cyc(case, p):
@@ -55,18 +57,26 @@ def main():
 
     base = ALLOCS[0]
     print(f'\n## Аллокаторы внутри языка (ALLOC / {base} того же языка)\n')
-    cols = [(l, a) for l in LANGS for a in ALLOCS[1:] if f'{l}-{a}' in pairs]
-    print('| сценарий | ' + ' | '.join(f'{l}: {a}/{base}' for l, a in cols) + ' |')
+    cols = [(lang, a) for lang in LANGS for a in ALLOCS[1:] if f'{lang}-{a}' in pairs]
+    print('| сценарий | ' + ' | '.join(f'{lang}: {a}/{base}' for lang, a in cols) + ' |')
     print('|---|' + '---|' * len(cols))
     for case in cases:
-        print(f'| {case} | ' + ' | '.join(ratio(case, f'{l}-{base}', f'{l}-{a}') for l, a in cols) + ' |')
+        print(
+            f'| {case} | '
+            + ' | '.join(ratio(case, f'{lang}-{base}', f'{lang}-{a}') for lang, a in cols)
+            + ' |'
+        )
 
     print('\n## Языки при одном аллокаторе (LANG / C того же аллокатора)\n')
-    cols = [(a, l) for a in ALLOCS for l in LANGS[1:] if f'{l}-{a}' in pairs]
-    print('| сценарий | ' + ' | '.join(f'{a}: {l}/C' for a, l in cols) + ' |')
+    cols = [(a, lang) for a in ALLOCS for lang in LANGS[1:] if f'{lang}-{a}' in pairs]
+    print('| сценарий | ' + ' | '.join(f'{a}: {lang}/C' for a, lang in cols) + ' |')
     print('|---|' + '---|' * len(cols))
     for case in cases:
-        print(f'| {case} | ' + ' | '.join(ratio(case, f'C-{a}', f'{l}-{a}') for a, l in cols) + ' |')
+        print(
+            f'| {case} | '
+            + ' | '.join(ratio(case, f'C-{a}', f'{lang}-{a}') for a, lang in cols)
+            + ' |'
+        )
 
     print('\n## Доля быстрого режима (по IPC, как в compare.py)\n')
     print('| сценарий | ' + ' | '.join(pairs) + ' |')
@@ -82,8 +92,13 @@ def main():
     print('| сценарий | ' + ' | '.join(pairs) + ' |')
     print('|---|' + '---:|' * len(pairs))
     for case in cases:
-        print(f'| {case} | ' + ' | '.join(
-            f'{st.median(r["peak"] for r in pooled[case][p]) / 2**20:.0f}' for p in pairs) + ' |')
+        print(
+            f'| {case} | '
+            + ' | '.join(
+                f'{st.median(r["peak"] for r in pooled[case][p]) / 2**20:.0f}' for p in pairs
+            )
+            + ' |'
+        )
 
 
 if __name__ == '__main__':

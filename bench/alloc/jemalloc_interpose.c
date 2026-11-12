@@ -17,9 +17,11 @@
 // разрешиться в libSystem — для этого -lSystem стоит перед -ljemalloc (без
 // него они уходят в libjemalloc; проверка: nm -m, «from libSystem»):
 //   cc -O2 -dynamiclib -I$(brew --prefix jemalloc)/include \
-//       -DJEMALLOC_DYLIB='"'$(brew --prefix jemalloc)/lib/libjemalloc.2.dylib'"' \
-//       -o build/alloc/jemalloc_interpose.dylib bench/alloc/jemalloc_interpose.c \
-//       -lSystem -L$(brew --prefix jemalloc)/lib -ljemalloc
+//       -DJEMALLOC_DYLIB='"'$(brew --prefix
+//       jemalloc)/lib/libjemalloc.2.dylib'"' \
+//       -o build/alloc/jemalloc_interpose.dylib
+//       bench/alloc/jemalloc_interpose.c \ -lSystem -L$(brew --prefix
+//       jemalloc)/lib -ljemalloc
 #include <dlfcn.h>
 #include <malloc/malloc.h>
 #include <stdint.h>
@@ -53,7 +55,10 @@ static void *je_malloc_(size_t n) {
 }
 
 static void je_free_(void *p) {
-  if (__builtin_expect(real_free != NULL, 1)) return real_free(p);
+  if (__builtin_expect(real_free != NULL, 1)) {
+    real_free(p);
+    return;
+  }
   if (p) dallocx(p, 0);
 }
 
@@ -91,7 +96,7 @@ static void *je_valloc_(size_t n) {
   __attribute__((used)) static const struct {                                  \
     const void *replacement, *replacee;                                        \
   } interpose_##name __attribute__((section("__DATA,__interpose"))) = {        \
-      (const void *)je_##name##_, (const void *)name}
+      (const void *)je_##name##_, (const void *)(name)}
 
 INTERPOSE(malloc);
 INTERPOSE(free);

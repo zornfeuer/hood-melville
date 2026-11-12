@@ -8,7 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static _Atomic unsigned long long n_malloc, n_calloc, n_realloc, n_free, n_memalign, bytes;
+static _Atomic unsigned long long n_malloc, n_calloc, n_realloc, n_free,
+    n_memalign, bytes;
 
 static void *my_malloc(size_t n) {
   atomic_fetch_add_explicit(&n_malloc, 1, memory_order_relaxed);
@@ -41,16 +42,19 @@ static void *my_aligned_alloc(size_t a, size_t n) {
 }
 
 __attribute__((destructor)) static void report(void) {
-  fprintf(stderr, "alloc-calls malloc=%llu calloc=%llu realloc=%llu memalign=%llu free=%llu bytes=%llu\n",
-          (unsigned long long)n_malloc, (unsigned long long)n_calloc, (unsigned long long)n_realloc,
-          (unsigned long long)n_memalign, (unsigned long long)n_free, (unsigned long long)bytes);
+  fprintf(stderr,
+          "alloc-calls malloc=%llu calloc=%llu realloc=%llu memalign=%llu "
+          "free=%llu bytes=%llu\n",
+          (unsigned long long)n_malloc, (unsigned long long)n_calloc,
+          (unsigned long long)n_realloc, (unsigned long long)n_memalign,
+          (unsigned long long)n_free, (unsigned long long)bytes);
 }
 
 #define INTERPOSE(name)                                                        \
   __attribute__((used)) static const struct {                                  \
     const void *replacement, *replacee;                                        \
   } interpose_##name __attribute__((section("__DATA,__interpose"))) = {        \
-      (const void *)my_##name, (const void *)name}
+      (const void *)my_##name, (const void *)(name)}
 
 INTERPOSE(malloc);
 INTERPOSE(calloc);

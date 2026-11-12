@@ -6,13 +6,13 @@
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <cstdint>
-#include <type_traits>
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
-#include <iterator>
 #include <deque>
+#include <iterator>
 #include <set>
+#include <type_traits>
 #include <vector>
 
 #include "fqueue.h"
@@ -29,10 +29,12 @@ static bool injected = false;
 static std::set<void *> *tracked = nullptr;
 
 extern "C" void *fqueue_test_malloc(size_t size) {
-  if (fail_in >= 0 && fail_in-- == 0) {
+  if (fail_in == 0) {
+    fail_in = -1;
     injected = true;
     return nullptr;
   }
+  if (fail_in > 0) --fail_in;
   void *p = std::malloc(size);
   if (p) ++live, ++allocs;
   if (p && tracked) tracked->insert(p);
@@ -53,8 +55,7 @@ static void track(std::set<void *> &blocks) { tracked = &blocks; }
 static long free_tracked() {
   std::set<void *> &blocks = *tracked;
   tracked = nullptr;
-  for (void *p : blocks)
-    fqueue_test_free(p);
+  for (void *p : blocks) fqueue_test_free(p);
   long n = (long)blocks.size();
   blocks.clear();
   return n;
@@ -97,8 +98,7 @@ template <class Q> static fqueue_status do_pop(Q *out, const Q *q) {
 // The same for an in-place operation on *q: every injected failure must leave
 // *q as `expected`. Returns the number of failures; *q is then changed.
 template <class Op, class Q>
-static long in_place_under_oom(Op op, Q *q,
-                               const std::vector<int> &expected) {
+static long in_place_under_oom(Op op, Q *q, const std::vector<int> &expected) {
   for (long k = 0;; ++k) {
     long before = live;
     arm(k);
@@ -153,8 +153,8 @@ static void explore_oom(const Q *q, std::deque<int> &model, int depth,
 
   Q child;
   failures += op_under_oom(
-      [&](Q *out, const Q *p) { return Api<Q>::push(out, p, depth); },
-      &child, q, expected);
+      [&](Q *out, const Q *p) { return Api<Q>::push(out, p, depth); }, &child,
+      q, expected);
   model.push_back(depth);
   explore_oom(&child, model, depth - 1, failures);
   model.pop_back();
@@ -205,7 +205,8 @@ TEST_CASE("out of memory in any allocation along a long history", "[limits]") {
     auto pop = [&] {
       std::vector<int> expected(model.begin(), model.end());
       fqueue out;
-      failures += op_under_oom(do_pop<fqueue>, &out, versions.back().get(), expected);
+      failures +=
+          op_under_oom(do_pop<fqueue>, &out, versions.back().get(), expected);
       fqueue_destroy(&out);
       versions.push_back(*versions.back().pop());
       model.pop_front();
@@ -215,8 +216,7 @@ TEST_CASE("out of memory in any allocation along a long history", "[limits]") {
       push();
       pop();
     }
-    while (!model.empty())
-      pop();
+    while (!model.empty()) pop();
     REQUIRE(failures > 100);
   }
   REQUIRE(live == start);
@@ -250,8 +250,7 @@ TEST_CASE("out of memory in any allocation of in-place operations on a version "
       push();
       pop();
     }
-    while (!model.empty())
-      pop();
+    while (!model.empty()) pop();
     REQUIRE(contents(&q).empty());
     REQUIRE(failures > 50);
     fqueue_destroy(&q);
@@ -259,13 +258,11 @@ TEST_CASE("out of memory in any allocation of in-place operations on a version "
   REQUIRE(live == start);
 }
 
-TEST_CASE("pushing past the length limit reports FQUEUE_OVERFLOW",
-          "[limits]") {
+TEST_CASE("pushing past the length limit reports FQUEUE_OVERFLOW", "[limits]") {
   long start = live;
   {
     Q q;
-    for (int i = 0; i < TEST_LEN_LIMIT; ++i)
-      q = q.push(i);
+    for (int i = 0; i < TEST_LEN_LIMIT; ++i) q = q.push(i);
     std::vector<int> expected = contents(q);
 
     fqueue out;
@@ -293,7 +290,7 @@ TEST_CASE("random operations on many shared versions with saturated counts",
   track(blocks);
   {
     std::vector<fqueue> versions(1);
-    fqueue_init(&versions[0]);
+    fqueue_init(&versions.front());
     std::vector<std::deque<int>> models{{}};
     uint64_t x = 0x2545F4914F6CDD1Du;
     for (int k = 0; k < 20000; ++k) {
@@ -302,7 +299,8 @@ TEST_CASE("random operations on many shared versions with saturated counts",
       x ^= x << 17;
       // Half of the operations hit the first few versions, so that the same
       // nodes are shared over and over.
-      size_t n = (x & 1) ? std::min<size_t>(versions.size(), 4) : versions.size();
+      size_t n =
+          (x & 1) ? std::min<size_t>(versions.size(), 4) : versions.size();
       size_t i = (x >> 8) % n;
       std::deque<int> model = models[i];
       fqueue out;
@@ -370,8 +368,7 @@ TEST_CASE("random operations on many shared versions with saturated counts",
       versions.push_back(out);
       models.push_back(std::move(model));
     }
-    for (fqueue &v : versions)
-      fqueue_destroy(&v);
+    for (fqueue &v : versions) fqueue_destroy(&v);
   }
   REQUIRE(free_tracked() > 0); // counts did saturate
   REQUIRE(live == start);
@@ -431,16 +428,14 @@ TEMPLATE_TEST_CASE("a saturated reference count pins its node in both "
     // shared too.
     TestType q;
     A::init(&q);
-    for (int i = 0; i < 9; ++i)
-      REQUIRE(A::push_in_place(&q, i) == FQUEUE_OK);
+    for (int i = 0; i < 9; ++i) REQUIRE(A::push_in_place(&q, i) == FQUEUE_OK);
     REQUIRE(A::pop_in_place(&q, nullptr) == FQUEUE_OK);
     std::vector<int> expected = contents_of(&q);
     nodes = live - start;
 
     // Far more clones than the limit: none fails, nothing is allocated.
     std::vector<TestType> clones(3 * TEST_REFS_LIMIT);
-    for (TestType &c : clones)
-      A::clone(&c, &q);
+    for (TestType &c : clones) A::clone(&c, &q);
     REQUIRE(live - start == nodes);
 
     // Every operation still works, persistent and in place.
@@ -451,7 +446,8 @@ TEMPLATE_TEST_CASE("a saturated reference count pins its node in both "
     REQUIRE(contents_of(&out) == pushed);
     A::destroy(&out);
     REQUIRE(A::pop(&out, &q) == FQUEUE_OK);
-    REQUIRE(contents_of(&out) == std::vector<int>(expected.begin() + 1, expected.end()));
+    REQUIRE(contents_of(&out) ==
+            std::vector<int>(expected.begin() + 1, expected.end()));
     A::destroy(&out);
     REQUIRE(A::push_in_place(&clones.back(), -1) == FQUEUE_OK);
     REQUIRE(contents_of(&clones.back()) == pushed);
@@ -460,8 +456,7 @@ TEMPLATE_TEST_CASE("a saturated reference count pins its node in both "
     REQUIRE(v == expected.front());
 
     // Destroying the clones leaves q intact.
-    for (TestType &c : clones)
-      A::destroy(&c);
+    for (TestType &c : clones) A::destroy(&c);
     REQUIRE(contents_of(&q) == expected);
     A::destroy(&q);
   }
@@ -501,8 +496,8 @@ TEMPLATE_TEST_CASE("a pool slab that cannot be allocated is FQUEUE_NOMEM",
     for (int k = 0; k < i; ++k) expected[k] = k;
     TestType out;
     failures += op_under_oom(
-        [i](TestType *o, const TestType *p) { return A::push(o, p, i); }, &out, &q,
-        expected);
+        [i](TestType *o, const TestType *p) { return A::push(o, p, i); }, &out,
+        &q, expected);
     A::destroy(&q);
     q = out;
   }
@@ -528,12 +523,14 @@ TEMPLATE_TEST_CASE("a pool slab that cannot be allocated is FQUEUE_NOMEM",
 // (it is determined by how many rotation steps of which phase it makes). The
 // sequence is shared with rust/tests/schedule.rs and zig/src/tests.zig.
 static const long schedule_expected[] = {
-    2, 1, 3, 2, 2, 1, 3, 3, 3, 2, 2, 2, 2, 1, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 1,
-    3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-    1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0, 1, 0,
-    1, 0, 1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0,
-    1, 0, 1, 0, 1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    2, 1, 3, 2, 2, 1, 3, 3, 3, 2, 2, 2, 2, 1, 3, 3, 3, 3, 3, 3, 3, 2, 2,
+    2, 2, 2, 2, 2, 2, 1, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1,
+    2, 1, 2, 1, 2, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 3, 2, 3, 2, 3, 2, 3,
+    2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2,
+    0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2,
+    3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 TEMPLATE_TEST_CASE("the rotation schedule matches Rust and Zig", "[limits]",
                    fqueue, fqueue_sync) {
@@ -557,7 +554,8 @@ TEMPLATE_TEST_CASE("the rotation schedule matches Rust and Zig", "[limits]",
   }
   while (A::size(&q) > 0) op(false, 0);
   A::destroy(&q);
-  REQUIRE(got == std::vector<long>(std::begin(schedule_expected), std::end(schedule_expected)));
+  REQUIRE(got == std::vector<long>(std::begin(schedule_expected),
+                                   std::end(schedule_expected)));
 }
 
 TEMPLATE_TEST_CASE("an in-place operation that needs a slab fails without a "
@@ -600,7 +598,8 @@ TEMPLATE_TEST_CASE("an in-place operation that needs a slab fails without a "
       s = push ? A::push_in_place(&q, k) : A::pop_in_place(&q, &v);
     }
     REQUIRE(s == FQUEUE_OK);
-    if (push) model.push_back(k);
+    if (push)
+      model.push_back(k);
     else {
       REQUIRE(v == model.front());
       model.pop_front();

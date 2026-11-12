@@ -90,14 +90,37 @@ Refs: #3
 
 ## Before committing
 
-- Tests: `just test`. For the touched implementation, also:
-  - C: `just c-asan`, `just c-tsan`, `just c-leaks`;
-  - Rust: `just rust-lint`, `just rust-miri`;
-  - Zig: `just zig-lint`.
-- Performance: `just bench-quick` against the saved baseline. Any claim
-  about speed needs an A/B over the 4 code layouts (`bench-layouts*`,
-  `bench/compare.py`) and an entry in `docs/benchmarks.md`.
-- Fairness rules for comparing languages are in `docs/plan.md`:
+Run locally what CI runs. Every CI job calls the same `just` recipes
+(`.github/workflows/ci.yml`), so a green local run means a green CI run.
+
+- **Formatting and linters:** `just lint`. It covers every source:
+  libraries, tests, benchmark workloads and scripts. `just fmt` applies
+  the formatting.
+
+  | language | formatter | linter |
+  |---|---|---|
+  | C/C++ | clang-format (`.clang-format`) | clang-tidy (`.clang-tidy`); a build of every CMake target with `-Wall -Wextra -Wpedantic -Werror`, including the pooled workloads and the macOS allocator shims in `bench/` |
+  | Rust | rustfmt | clippy pedantic on all targets, with and without `pool`, and `bench/snapshot/rd.rs` |
+  | Zig | `zig fmt` | `zig ast-check` of every file |
+  | Python (`bench/*.py`) | ruff format (`ruff.toml`) | ruff check |
+  | Shell, `justfile`, workflow | `just --fmt` | shellcheck, actionlint |
+
+  The versions of clang-format, clang-tidy, ruff, shellcheck and
+  actionlint are pinned in the `justfile` and run through `uvx`, so local
+  runs and CI use the same tools.
+- **Tests:** `just test`. For the implementation you touched, also:
+  - C: `just c-asan`, `just c-tsan`, `just c-leaks` (macOS),
+    `just c-install-check`. C builds use `-Werror`. CI runs C on Linux
+    (GCC) and on macOS (clang).
+  - Rust: `just rust-miri`.
+- **Performance:** `just bench-quick` against the saved baseline. Any
+  claim about speed needs:
+  - an A/B over the 4 code layouts (`bench-layouts*`, `bench/compare.py`);
+  - an entry in `docs/benchmarks.md`.
+
+  A change to a benchmark workload must not change the measured code;
+  compare its machine code, or measure it.
+- **Fairness rules** for comparing languages are in `docs/plan.md`:
   - final implementations are idiomatic for their language, even at a
     cost;
   - a non-idiomatic variant may exist only as a labeled demonstration;

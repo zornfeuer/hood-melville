@@ -14,9 +14,9 @@ static bool operator==(point a, point b) { return a.x == b.x && a.y == b.y; }
 TEST_CASE("pointq: struct elements in a persistent history", "[generic]") {
   // Push two, pop one, keeping every version alive; then check each version
   // against its model through the iterator.
-  std::vector<pointq>             versions(1);
+  std::vector<pointq> versions(1);
   std::vector<std::deque<point>> models{{}};
-  pointq_init(&versions[0]);
+  pointq_init(&versions.front());
   for (int i = 0; i < 300; ++i) {
     pointq next;
     std::deque<point> model = models.back();
@@ -40,17 +40,14 @@ TEST_CASE("pointq: struct elements in a persistent history", "[generic]") {
     pointq_iter it;
     pointq_iter_init(&it, &versions[k]);
     point p;
-    while (pointq_iter_next(&it, &p) == FQUEUE_OK)
-      got.push_back(p);
+    while (pointq_iter_next(&it, &p) == FQUEUE_OK) got.push_back(p);
     pointq_iter_destroy(&it);
     REQUIRE(got == std::vector<point>(models[k].begin(), models[k].end()));
   }
-  for (pointq &q : versions)
-    pointq_destroy(&q);
+  for (pointq &q : versions) pointq_destroy(&q);
 }
 
-TEST_CASE("strq: pointer elements are stored, not copied deeply",
-          "[generic]") {
+TEST_CASE("strq: pointer elements are stored, not copied deeply", "[generic]") {
   static const char *words[] = {"alpha", "beta", "gamma", "delta", "epsilon"};
   strq a, b;
   strq_init(&a);

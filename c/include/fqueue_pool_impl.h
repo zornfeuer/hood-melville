@@ -51,28 +51,27 @@ typedef struct fqueue_impl_npool fqueue_impl_npool;
 #define FQUEUE_IMPL_CACHE_LINE 128
 
 typedef struct fqueue_impl_npool_cache {
-  _Alignas(FQUEUE_IMPL_CACHE_LINE)
-  void                          *free;  // LIFO list of free nodes
-  _Atomic uint32_t               nfree; // its length (read by stats)
-  _Atomic(char *)                cur;   // carving: next node of the slab
-  _Atomic(char *)                end;   // end of the slab
-  fqueue_impl_npool              *pool;
-  struct fqueue_impl_npool_cache *next;  // registry of the pool's caches
-  void                          *raw;   // FQUEUE_MALLOC block holding it
+  _Alignas(FQUEUE_IMPL_CACHE_LINE) void *free; // LIFO list of free nodes
+  _Atomic uint32_t nfree;                      // its length (read by stats)
+  _Atomic(char *) cur;                         // carving: next node of the slab
+  _Atomic(char *) end;                         // end of the slab
+  fqueue_impl_npool *pool;
+  struct fqueue_impl_npool_cache *next; // registry of the pool's caches
+  void *raw;                            // FQUEUE_MALLOC block holding it
 } fqueue_impl_npool_cache;
 
 struct fqueue_impl_npool {
-  size_t                  node_size; // >= 2 pointers, a multiple of alignment
-  _Atomic int             lock;
-  _Atomic(void *)         batches;   // stack of batches (peeked without the lock)
-  size_t                  global;    // nodes in batches
-  void                   *slabs;     // all slabs, linked through word 0
-  size_t                  nslabs;
-  size_t                  abandoned; // uncarved nodes of exited threads' slabs
+  size_t node_size; // >= 2 pointers, a multiple of alignment
+  _Atomic int lock;
+  _Atomic(void *) batches; // stack of batches (peeked without the lock)
+  size_t global;           // nodes in batches
+  void *slabs;             // all slabs, linked through word 0
+  size_t nslabs;
+  size_t abandoned; // uncarved nodes of exited threads' slabs
   fqueue_impl_npool_cache *registry;
-  uint64_t                slab_allocs, slab_frees, spills, refills;
-  bool                    key_ready;
-  pthread_key_t           key;       // thread-exit destructor
+  uint64_t slab_allocs, slab_frees, spills, refills;
+  bool key_ready;
+  pthread_key_t key; // thread-exit destructor
 };
 
 #define FQUEUE_IMPL_NPOOL_INIT(node_type) {.node_size = sizeof(node_type)}
@@ -99,10 +98,13 @@ static size_t fqueue_impl_npool_per_slab(const fqueue_impl_npool *p) {
 // Push the batch of `n` nodes headed by `head` (linked through word 0, the
 // last one NULL); the caller holds the lock.
 static void fqueue_impl_npool_push_batch(fqueue_impl_npool *p, void *head,
-                                        uint32_t n) {
+                                         uint32_t n) {
   void *second = *fqueue_impl_npool_word(head, 0);
+  // The batch size rides in a pointer-sized word of a free node.
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
   if (second) *fqueue_impl_npool_word(second, 1) = (void *)(uintptr_t)n;
-  *fqueue_impl_npool_word(head, 1) = atomic_load_explicit(&p->batches, memory_order_relaxed);
+  *fqueue_impl_npool_word(head, 1) =
+      atomic_load_explicit(&p->batches, memory_order_relaxed);
   atomic_store_explicit(&p->batches, head, memory_order_relaxed);
   p->global += n;
 }
@@ -110,11 +112,11 @@ static void fqueue_impl_npool_push_batch(fqueue_impl_npool *p, void *head,
 // Give the cache's whole list to the pool in batches; the caller holds the
 // lock.
 static void fqueue_impl_npool_flush_locked(fqueue_impl_npool *p,
-                                          fqueue_impl_npool_cache *c) {
+                                           fqueue_impl_npool_cache *c) {
   void *node = c->free;
   while (node) {
-    void    *head = node, *last = node;
-    uint32_t n    = 1;
+    void *head = node, *last = node;
+    uint32_t n = 1;
     while (n < FQUEUE_IMPL_BATCH && *fqueue_impl_npool_word(last, 0)) {
       last = *fqueue_impl_npool_word(last, 0);
       n++;
@@ -131,7 +133,7 @@ static void fqueue_impl_npool_flush_locked(fqueue_impl_npool *p,
 // uncarved until trim; the cache leaves the registry.
 static void fqueue_impl_npool_thread_exit(void *arg) {
   fqueue_impl_npool_cache *c = (fqueue_impl_npool_cache *)arg;
-  fqueue_impl_npool       *p = c->pool;
+  fqueue_impl_npool *p = c->pool;
   fqueue_impl_npool_lock(p);
   fqueue_impl_npool_flush_locked(p, c);
   char *cur = atomic_load_explicit(&c->cur, memory_order_relaxed);
@@ -151,14 +153,15 @@ static void fqueue_impl_npool_thread_exit(void *arg) {
 static fqueue_impl_npool_cache *
 fqueue_impl_npool_register(fqueue_impl_npool *p, fqueue_impl_npool_cache **tl) {
   // FQUEUE_MALLOC promises no more than max_align_t: align by hand.
-  char *raw = (char *)FQUEUE_MALLOC(sizeof(fqueue_impl_npool_cache) + FQUEUE_IMPL_CACHE_LINE);
+  char *raw = (char *)FQUEUE_MALLOC(sizeof(fqueue_impl_npool_cache) +
+                                    FQUEUE_IMPL_CACHE_LINE);
   if (!raw) return NULL;
   fqueue_impl_npool_cache *c =
       (fqueue_impl_npool_cache *)(raw + FQUEUE_IMPL_CACHE_LINE -
                                   (uintptr_t)raw % FQUEUE_IMPL_CACHE_LINE);
-  *c      = (fqueue_impl_npool_cache){0};
+  *c = (fqueue_impl_npool_cache){0};
   c->pool = p;
-  c->raw  = raw;
+  c->raw = raw;
   fqueue_impl_npool_lock(p);
   if (!p->key_ready) { // pthread_once takes no argument, so under the lock
     if (pthread_key_create(&p->key, fqueue_impl_npool_thread_exit) != 0) {
@@ -168,7 +171,7 @@ fqueue_impl_npool_register(fqueue_impl_npool *p, fqueue_impl_npool_cache **tl) {
     }
     p->key_ready = true;
   }
-  c->next     = p->registry;
+  c->next = p->registry;
   p->registry = c;
   fqueue_impl_npool_unlock(p);
   pthread_setspecific(p->key, c);
@@ -178,26 +181,28 @@ fqueue_impl_npool_register(fqueue_impl_npool *p, fqueue_impl_npool_cache **tl) {
 
 // Allocation when the cache's list is empty (or there is no cache yet): a
 // batch from the global stack, then the cache's slab, then a new slab.
-static void *fqueue_impl_npool_alloc_slow(fqueue_impl_npool        *p,
-                                         fqueue_impl_npool_cache **tl) {
+static void *fqueue_impl_npool_alloc_slow(fqueue_impl_npool *p,
+                                          fqueue_impl_npool_cache **tl) {
   fqueue_impl_npool_cache *c = *tl;
   if (!c && !(c = fqueue_impl_npool_register(p, tl))) return NULL;
   if (c->free) { // registered just now by a free
     void *n = c->free;
     c->free = *fqueue_impl_npool_word(n, 0);
-    atomic_store_explicit(&c->nfree,
-                          atomic_load_explicit(&c->nfree, memory_order_relaxed) - 1,
-                          memory_order_relaxed);
+    atomic_store_explicit(
+        &c->nfree, atomic_load_explicit(&c->nfree, memory_order_relaxed) - 1,
+        memory_order_relaxed);
     return n;
   }
-  if (atomic_load_explicit(&p->batches, memory_order_relaxed)) { // again under the lock
+  if (atomic_load_explicit(&p->batches,
+                           memory_order_relaxed)) { // again under the lock
     fqueue_impl_npool_lock(p);
     void *head = atomic_load_explicit(&p->batches, memory_order_relaxed);
     if (head) {
       atomic_store_explicit(&p->batches, *fqueue_impl_npool_word(head, 1),
                             memory_order_relaxed);
-      void    *sec = *fqueue_impl_npool_word(head, 0);
-      uint32_t n   = sec ? (uint32_t)(uintptr_t)*fqueue_impl_npool_word(sec, 1) : 1;
+      void *sec = *fqueue_impl_npool_word(head, 0);
+      uint32_t n =
+          sec ? (uint32_t)(uintptr_t)*fqueue_impl_npool_word(sec, 1) : 1;
       p->global -= n;
       p->refills++;
       fqueue_impl_npool_unlock(p);
@@ -218,7 +223,8 @@ static void *fqueue_impl_npool_alloc_slow(fqueue_impl_npool        *p,
     p->slab_allocs++;
     fqueue_impl_npool_unlock(p);
     cur = slab + p->node_size;
-    atomic_store_explicit(&c->end, cur + fqueue_impl_npool_per_slab(p) * p->node_size,
+    atomic_store_explicit(&c->end,
+                          cur + fqueue_impl_npool_per_slab(p) * p->node_size,
                           memory_order_relaxed);
   }
   atomic_store_explicit(&c->cur, cur + p->node_size, memory_order_relaxed);
@@ -233,15 +239,15 @@ static void *fqueue_impl_npool_alloc_slow(fqueue_impl_npool        *p,
 // and Rust do: allocating the nodes ahead would change their order, and with
 // LIFO reuse the order decides the layout of the lists (docs/pool.md). Frees
 // meanwhile only add nodes, and a spill leaves more than n.
-static bool fqueue_impl_npool_reserve_slow(fqueue_impl_npool        *p,
+static bool fqueue_impl_npool_reserve_slow(fqueue_impl_npool *p,
                                            fqueue_impl_npool_cache **tl,
-                                           unsigned                  n) {
+                                           unsigned n) {
   fqueue_impl_npool_cache *c = *tl;
   if (!c && !(c = fqueue_impl_npool_register(p, tl))) return false;
   uint32_t nfree = atomic_load_explicit(&c->nfree, memory_order_relaxed);
-  char    *cur   = atomic_load_explicit(&c->cur, memory_order_relaxed);
-  char    *end   = atomic_load_explicit(&c->end, memory_order_relaxed);
-  size_t   left  = cur ? (size_t)(end - cur) / p->node_size : 0;
+  char *cur = atomic_load_explicit(&c->cur, memory_order_relaxed);
+  char *end = atomic_load_explicit(&c->end, memory_order_relaxed);
+  size_t left = cur ? (size_t)(end - cur) / p->node_size : 0;
   if (FQUEUE_IMPL_LIKELY(nfree + left >= n)) return true;
   // Short: nfree + left < n <= 2, so the list holds at most one node.
   if (atomic_load_explicit(&p->batches, memory_order_relaxed)) {
@@ -250,13 +256,16 @@ static bool fqueue_impl_npool_reserve_slow(fqueue_impl_npool        *p,
     if (head) {
       atomic_store_explicit(&p->batches, *fqueue_impl_npool_word(head, 1),
                             memory_order_relaxed);
-      void    *sec = *fqueue_impl_npool_word(head, 0);
-      uint32_t k   = sec ? (uint32_t)(uintptr_t)*fqueue_impl_npool_word(sec, 1) : 1;
+      void *sec = *fqueue_impl_npool_word(head, 0);
+      uint32_t k =
+          sec ? (uint32_t)(uintptr_t)*fqueue_impl_npool_word(sec, 1) : 1;
       p->global -= k;
       p->refills++;
       fqueue_impl_npool_unlock(p);
-      if (c->free) *fqueue_impl_npool_word(c->free, 0) = head;
-      else c->free = head;
+      if (c->free)
+        *fqueue_impl_npool_word(c->free, 0) = head;
+      else
+        c->free = head;
       atomic_store_explicit(&c->nfree, nfree + k, memory_order_relaxed);
       if (nfree + k + left >= n) return true;
     } else {
@@ -273,18 +282,20 @@ static bool fqueue_impl_npool_reserve_slow(fqueue_impl_npool        *p,
   p->abandoned += left; // the rest of the old slab, counted until trim
   fqueue_impl_npool_unlock(p);
   cur = slab + p->node_size;
-  atomic_store_explicit(&c->end, cur + fqueue_impl_npool_per_slab(p) * p->node_size,
+  atomic_store_explicit(&c->end,
+                        cur + fqueue_impl_npool_per_slab(p) * p->node_size,
                         memory_order_relaxed);
   atomic_store_explicit(&c->cur, cur, memory_order_relaxed);
   return true;
 }
 
 // Usually the list alone holds n nodes.
-static inline bool fqueue_impl_npool_reserve(fqueue_impl_npool        *p,
+static inline bool fqueue_impl_npool_reserve(fqueue_impl_npool *p,
                                              fqueue_impl_npool_cache **tl,
-                                             unsigned                  n) {
+                                             unsigned n) {
   fqueue_impl_npool_cache *c = *tl;
-  if (FQUEUE_IMPL_LIKELY(c && atomic_load_explicit(&c->nfree, memory_order_relaxed) >= n))
+  if (FQUEUE_IMPL_LIKELY(
+          c && atomic_load_explicit(&c->nfree, memory_order_relaxed) >= n))
     return true;
   return fqueue_impl_npool_reserve_slow(p, tl, n);
 }
@@ -292,8 +303,8 @@ static inline bool fqueue_impl_npool_reserve(fqueue_impl_npool        *p,
 // A free with no cache yet, or with a cache over FQUEUE_IMPL_CACHE_MAX after
 // the node was added: register, or give FQUEUE_IMPL_BATCH nodes from the top.
 // Without memory for a cache the node goes to the global stack alone.
-static void fqueue_impl_npool_free_slow(fqueue_impl_npool        *p,
-                                       fqueue_impl_npool_cache **tl, void *n) {
+static void fqueue_impl_npool_free_slow(fqueue_impl_npool *p,
+                                        fqueue_impl_npool_cache **tl, void *n) {
   fqueue_impl_npool_cache *c = *tl;
   if (!c) {
     *fqueue_impl_npool_word(n, 0) = NULL;
@@ -322,22 +333,23 @@ static void fqueue_impl_npool_free_slow(fqueue_impl_npool        *p,
   fqueue_impl_npool_unlock(p);
 }
 
-static inline void *fqueue_impl_npool_alloc(fqueue_impl_npool        *p,
-                                           fqueue_impl_npool_cache **tl) {
+static inline void *fqueue_impl_npool_alloc(fqueue_impl_npool *p,
+                                            fqueue_impl_npool_cache **tl) {
   fqueue_impl_npool_cache *c = *tl;
-  void                   *n;
+  void *n;
   if (FQUEUE_IMPL_LIKELY(c && (n = c->free))) {
     c->free = *fqueue_impl_npool_word(n, 0);
-    atomic_store_explicit(&c->nfree,
-                          atomic_load_explicit(&c->nfree, memory_order_relaxed) - 1,
-                          memory_order_relaxed);
+    atomic_store_explicit(
+        &c->nfree, atomic_load_explicit(&c->nfree, memory_order_relaxed) - 1,
+        memory_order_relaxed);
     return n;
   }
   return fqueue_impl_npool_alloc_slow(p, tl);
 }
 
-static inline void fqueue_impl_npool_free(fqueue_impl_npool        *p,
-                                         fqueue_impl_npool_cache **tl, void *n) {
+static inline void fqueue_impl_npool_free(fqueue_impl_npool *p,
+                                          fqueue_impl_npool_cache **tl,
+                                          void *n) {
   fqueue_impl_npool_cache *c = *tl;
   if (FQUEUE_IMPL_LIKELY(c)) {
     uint32_t k = atomic_load_explicit(&c->nfree, memory_order_relaxed) + 1;
@@ -355,25 +367,26 @@ static size_t fqueue_impl_npool_free_nodes(const fqueue_impl_npool *p) {
   size_t n = p->global + p->abandoned;
   for (const fqueue_impl_npool_cache *c = p->registry; c; c = c->next) {
     n += atomic_load_explicit(&c->nfree, memory_order_relaxed);
-    fqueue_impl_npool_cache *m   = (fqueue_impl_npool_cache *)c;
-    char                   *cur = atomic_load_explicit(&m->cur, memory_order_relaxed);
-    char                   *end = atomic_load_explicit(&m->end, memory_order_relaxed);
+    fqueue_impl_npool_cache *m = (fqueue_impl_npool_cache *)c;
+    char *cur = atomic_load_explicit(&m->cur, memory_order_relaxed);
+    char *end = atomic_load_explicit(&m->end, memory_order_relaxed);
     if (cur) n += (size_t)(end - cur) / p->node_size;
   }
   return n;
 }
 
-static void fqueue_impl_npool_stats(fqueue_impl_npool *p, fqueue_pool_stats *s) {
+static void fqueue_impl_npool_stats(fqueue_impl_npool *p,
+                                    fqueue_pool_stats *s) {
   fqueue_impl_npool_lock(p);
-  s->slabs       = p->nslabs;
-  s->slab_bytes  = p->nslabs * FQUEUE_IMPL_SLAB_BYTES;
-  s->capacity    = p->nslabs * fqueue_impl_npool_per_slab(p);
-  s->free        = fqueue_impl_npool_free_nodes(p);
-  s->live        = s->capacity - s->free;
+  s->slabs = p->nslabs;
+  s->slab_bytes = p->nslabs * FQUEUE_IMPL_SLAB_BYTES;
+  s->capacity = p->nslabs * fqueue_impl_npool_per_slab(p);
+  s->free = fqueue_impl_npool_free_nodes(p);
+  s->live = s->capacity - s->free;
   s->slab_allocs = p->slab_allocs;
-  s->slab_frees  = p->slab_frees;
-  s->spills      = p->spills;
-  s->refills     = p->refills;
+  s->slab_frees = p->slab_frees;
+  s->spills = p->spills;
+  s->refills = p->refills;
   fqueue_impl_npool_unlock(p);
 }
 
@@ -381,7 +394,8 @@ static void fqueue_impl_npool_stats(fqueue_impl_npool *p, fqueue_pool_stats *s) 
 // pool meanwhile (their caches are reset from here).
 static size_t fqueue_impl_npool_trim(fqueue_impl_npool *p) {
   fqueue_impl_npool_lock(p);
-  if (fqueue_impl_npool_free_nodes(p) != p->nslabs * fqueue_impl_npool_per_slab(p)) {
+  if (fqueue_impl_npool_free_nodes(p) !=
+      p->nslabs * fqueue_impl_npool_per_slab(p)) {
     fqueue_impl_npool_unlock(p);
     return 0;
   }

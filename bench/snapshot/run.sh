@@ -12,7 +12,9 @@ mkdir -p "$out/order"
 for a in lifo quarantine bump split pad128 owner; do
     cc -O2 -dynamiclib -o "$out/$a.dylib" "bench/snapshot/$a.c"
 done
-cp -R c/include c/src "$out/order/"
+# order.patch сделан к исходникам до резерва без выделения (#3, cafa6d4):
+# берём их из последнего коммита, к которому он прикладывается.
+git archive b9f56af c/include c/src | tar -x -C "$out/order" --strip-components=1
 patch -s -d "$out/order" -p0 < bench/snapshot/order.patch
 cc -O3 -march=native -flto -DNDEBUG -Ic/include bench/snapshot/rd.c c/src/fqueue.c -o "$out/rd-c"
 cc -O3 -march=native -flto -DNDEBUG -DFQ_NOPOOL -DFQ_FREE_FIRST -I"$out/order/include" \

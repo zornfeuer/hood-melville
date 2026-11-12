@@ -48,8 +48,7 @@ template <class Q> static bool fill_and_destroy(int n) {
   Q q;
   Api<Q>::init(&q);
   bool ok = true;
-  for (int i = 0; i < n; ++i)
-    ok &= Api<Q>::push_in_place(&q, i) == FQUEUE_OK;
+  for (int i = 0; i < n; ++i) ok &= Api<Q>::push_in_place(&q, i) == FQUEUE_OK;
   ok &= Api<Q>::size(&q) == (size_t)n;
   Api<Q>::destroy(&q);
   return ok;
@@ -71,7 +70,7 @@ TEMPLATE_TEST_CASE("the pool counts live nodes and trims when none is left",
   REQUIRE(s.live + s.free == s.capacity);
   // A queue of n elements holds at least n nodes (more during a rotation).
   REQUIRE(s.live >= 20000);
-  REQUIRE(s.live <= 3 * 20000);
+  REQUIRE(s.live <= size_t{3} * 20000);
   REQUIRE(P::trim() == 0); // q is alive
 
   TestType c;
@@ -108,10 +107,9 @@ TEMPLATE_TEST_CASE("memory is kept at the peak of live nodes until trim",
     REQUIRE(A::pop_in_place(&q, nullptr) == FQUEUE_OK);
   fqueue_pool_stats s = P::stats();
   REQUIRE(s.slabs == peak); // nothing returned automatically
-  REQUIRE(s.live < 3 * 1000);
+  REQUIRE(s.live < size_t{3} * 1000);
   // Growing again reuses the free nodes: no new slab.
-  for (int i = 0; i < 90000; ++i)
-    REQUIRE(A::push_in_place(&q, i) == FQUEUE_OK);
+  for (int i = 0; i < 90000; ++i) REQUIRE(A::push_in_place(&q, i) == FQUEUE_OK);
   REQUIRE(P::stats().slabs == peak);
   A::destroy(&q);
   REQUIRE(P::trim() == peak * 65536);
@@ -141,8 +139,8 @@ TEMPLATE_TEST_CASE("a long cache spills batches that other threads take",
   REQUIRE(P::trim() == slabs * 65536);
 }
 
-TEMPLATE_TEST_CASE("an exiting thread returns its cache and its slab",
-                   "[pool]", fqueue_pooled, fqueue_pooled_sync) {
+TEMPLATE_TEST_CASE("an exiting thread returns its cache and its slab", "[pool]",
+                   fqueue_pooled, fqueue_pooled_sync) {
   using P = Pool<TestType>;
   P::trim();
   // Short queues: the nodes stay in the thread's cache, the slab is barely
@@ -151,6 +149,7 @@ TEMPLATE_TEST_CASE("an exiting thread returns its cache and its slab",
   // each carves its own slab (otherwise, on few cores, a thread may exit
   // and hand its slab to the next one before it starts).
   std::vector<std::thread> threads;
+  threads.reserve(4);
   std::vector<int> ok(4, 1);
   std::latch all_live(4);
   for (int t = 0; t < 4; ++t)
@@ -162,13 +161,10 @@ TEMPLATE_TEST_CASE("an exiting thread returns its cache and its slab",
         ok[t] &= A::push_in_place(&q, i) == FQUEUE_OK;
       all_live.arrive_and_wait();
       A::destroy(&q);
-      for (int k = 0; k < 100; ++k)
-        ok[t] &= fill_and_destroy<TestType>(50);
+      for (int k = 0; k < 100; ++k) ok[t] &= fill_and_destroy<TestType>(50);
     });
-  for (std::thread &th : threads)
-    th.join();
-  for (int v : ok)
-    REQUIRE(v);
+  for (std::thread &th : threads) th.join();
+  for (int v : ok) REQUIRE(v);
   fqueue_pool_stats s = P::stats();
   REQUIRE(s.slabs >= 4); // a slab per thread
   REQUIRE(s.live == 0);
@@ -185,14 +181,13 @@ TEST_CASE("nodes freed by another thread stay in that thread's cache",
   enum { N = 30000, READERS = 4 };
   fqueue_pooled_sync base = filled<fqueue_pooled_sync>(N);
   std::vector<fqueue_pooled_sync> clones(READERS);
-  for (auto &c : clones)
-    A::clone(&c, &base);
+  for (auto &c : clones) A::clone(&c, &base);
   A::destroy(&base);
   std::vector<std::thread> threads;
+  threads.reserve(clones.size());
   for (auto &c : clones)
     threads.emplace_back([&c] { Api<fqueue_pooled_sync>::destroy(&c); });
-  for (std::thread &th : threads)
-    th.join();
+  for (std::thread &th : threads) th.join();
   fqueue_pool_stats s = P::stats();
   REQUIRE(s.live == 0);
   REQUIRE(P::trim() == s.slabs * 65536);
