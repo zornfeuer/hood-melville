@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Сводка прогона compare.py по сетке «язык × аллокатор» (#8).
 
-Имена бинарников — LANG-ALLOC/LAYOUT (например, Rust-mi/al64); запуски всех
+Имена бинарников — LANG-ALLOC/LAYOUT (например, Rust-mi/al64; первый
+встретившийся ALLOC — база отношений внутри языка); запуски всех
 раскладок одной пары LANG-ALLOC объединяются. Печатает:
 - такты (медиана всех запусков, млн) по сценариям;
 - аллокаторы внутри языка: ALLOC / sys того же языка;
@@ -23,7 +24,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compare import ratio_ci, split_modes  # noqa: E402
 
 LANGS = ['C', 'Rust', 'Zig']
-ALLOCS = ['sys', 'mi', 'je']
 
 
 def main():
@@ -34,6 +34,8 @@ def main():
     for case in cases:
         for name, runs in raw[case].items():
             pooled.setdefault(case, {}).setdefault(name.split('/')[0], []).extend(runs)
+    # Аллокаторы — в порядке появления в именах; первый — база (обычно sys).
+    ALLOCS = list(dict.fromkeys(p.split('-', 1)[1] for p in pooled[cases[0]]))
     pairs = [f'{l}-{a}' for l in LANGS for a in ALLOCS]
     pairs = [p for p in pairs if p in pooled[cases[0]]]
 
@@ -51,12 +53,13 @@ def main():
     for case in cases:
         print(f'| {case} | ' + ' | '.join(f'{st.median(cyc(case, p)):.1f}' for p in pairs) + ' |')
 
-    print('\n## Аллокаторы внутри языка (ALLOC / sys того же языка)\n')
+    base = ALLOCS[0]
+    print(f'\n## Аллокаторы внутри языка (ALLOC / {base} того же языка)\n')
     cols = [(l, a) for l in LANGS for a in ALLOCS[1:] if f'{l}-{a}' in pairs]
-    print('| сценарий | ' + ' | '.join(f'{l}: {a}/sys' for l, a in cols) + ' |')
+    print('| сценарий | ' + ' | '.join(f'{l}: {a}/{base}' for l, a in cols) + ' |')
     print('|---|' + '---|' * len(cols))
     for case in cases:
-        print(f'| {case} | ' + ' | '.join(ratio(case, f'{l}-sys', f'{l}-{a}') for l, a in cols) + ' |')
+        print(f'| {case} | ' + ' | '.join(ratio(case, f'{l}-{base}', f'{l}-{a}') for l, a in cols) + ' |')
 
     print('\n## Языки при одном аллокаторе (LANG / C того же аллокатора)\n')
     cols = [(a, l) for a in ALLOCS for l in LANGS[1:] if f'{l}-{a}' in pairs]
