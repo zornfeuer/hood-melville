@@ -289,6 +289,8 @@ just rust-lint               # rustfmt + clippy::pedantic
 just rust-miri               # Rust-тесты под Miri
 just zig-test                # Zig-тесты (zig build test)
 just zig-lint                # zig fmt --check
+just bench-quick-save        # быстрый контроль: сохранить базу (~полминуты)
+just bench-quick             # быстрый контроль: что изменилось против базы (инструкции, такты)
 just bench-compare-layouts   # сравнение C и Rust (несколько минут)
 just bench-compare-mut       # то же для операций на месте
 just bench-compare-sync      # цена потокобезопасных вариантов в одном потоке

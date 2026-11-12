@@ -138,7 +138,7 @@ threads 1.04–1.10 при share 0, 8.6 ядра при P=10 (`docs/benchmarks.m
 
 PMU по потокам (kperf, перехват `pthread_create`), подставные аллокаторы,
 подсчёт операций над счётчиками, зонд инструкций — в `bench/` с описанием;
-`just bench-quick`. Раскладки кода для Zig сделаны (`just zig-layout-bc`),
+`just bench-quick` (сделано: `bench/quick.py`). Раскладки кода для Zig сделаны (`just zig-layout-bc`),
 подставные аллокаторы и микротест snapshot — в `bench/snapshot/`. Делается по мере надобности для
 этапов 1–5, а не отдельно.
 

@@ -85,6 +85,37 @@ bench-build: zig-build
     cmake --build build/c --target fqueue_bench fqueue_bench_sync
     cd rust && RUSTFLAGS="-C target-cpu=native" cargo build --profile max --example fqueue_bench --example fqueue_bench_sync
 
+# --- Быстрый контроль (bench/quick.py) -----------------------------------------
+
+# Сборки для быстрого контроля: build/quick/{C,Rust,Zig}[-pool], одна раскладка.
+bench-quick-build: zig-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p build/quick
+    cc -O3 -march=native -flto -DNDEBUG -Ic/include c/bench/fqueue_bench.c c/src/fqueue.c -o build/quick/C
+    cc -O3 -march=native -flto -DNDEBUG -DFQUEUE_BENCH_POOL -Ic/include c/bench/fqueue_bench.c c/src/fqueue.c \
+        -o build/quick/C-pool
+    (cd rust && RUSTFLAGS="-C target-cpu=native" cargo build -q --profile max --example fqueue_bench --target-dir target/quick)
+    (cd rust && RUSTFLAGS="-C target-cpu=native" cargo build -q --profile max --features pool --example fqueue_bench \
+        --target-dir target/quick-pool)
+    cp rust/target/quick/max/examples/fqueue_bench build/quick/Rust
+    cp rust/target/quick-pool/max/examples/fqueue_bench build/quick/Rust-pool
+    cp zig/zig-out/bin/fqueue_bench build/quick/Zig
+    cp zig/zig-out/bin/fqueue_bench_pool build/quick/Zig-pool
+
+# Быстрый контроль за полминуты: инструкции и такты против сохранённой базы
+# (just bench-quick-save). names — через запятую, например "C,Rust-pool".
+bench-quick names="C,C-pool,Rust,Rust-pool,Zig,Zig-pool" rounds="10" *flags="": bench-quick-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bins=()
+    IFS=, read -ra names <<< "{{names}}"
+    for n in "${names[@]}"; do bins+=("$n=build/quick/$n"); done
+    python3 -I bench/quick.py --rounds {{rounds}} {{flags}} "${bins[@]}"
+
+# То же, и сохранить результат как новую базу.
+bench-quick-save names="C,C-pool,Rust,Rust-pool,Zig,Zig-pool" rounds="10": (bench-quick names rounds "--save")
+
 # Сценарии и размеры по умолчанию для сравнений.
 bench_cases := "--case fill:1000000 --case mixed:1000000 --case persistent:1000000 --case branching:1000000 --case fill:10000000 --case mixed:10000000"
 # Отдельный бенчмарк операций на месте (fill_mut, mixed_mut) рядом с теми же
