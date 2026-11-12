@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <algorithm>
 #include <cstdlib>
+#include <iterator>
 #include <deque>
 #include <vector>
 
@@ -18,6 +19,7 @@
 
 // Test allocator: counts live blocks and can fail one chosen allocation.
 static long live = 0;     // allocated and not yet freed
+static long allocs = 0;   // successful allocations, ever
 static long fail_in = -1; // fail the allocation after this many; -1: never
 static bool injected = false;
 
@@ -27,7 +29,7 @@ extern "C" void *fqueue_test_malloc(size_t size) {
     return nullptr;
   }
   void *p = std::malloc(size);
-  if (p) ++live;
+  if (p) ++live, ++allocs;
   return p;
 }
 
@@ -546,4 +548,41 @@ TEMPLATE_TEST_CASE("a pool slab that cannot be allocated is FQUEUE_NOMEM",
   A::destroy(&q);
   REQUIRE(trim() > 0);
   REQUIRE(live == start);
+}
+
+// The rotation schedule per operation is the same in C, Rust and Zig (#9):
+// on one history every persistent operation creates the same number of nodes
+// (it is determined by how many rotation steps of which phase it makes). The
+// sequence is shared with rust/tests/schedule.rs and zig/src/tests.zig.
+static const long schedule_expected[] = {
+    2, 1, 3, 2, 2, 1, 3, 3, 3, 2, 2, 2, 2, 1, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 1,
+    3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+TEMPLATE_TEST_CASE("the rotation schedule matches Rust and Zig", "[limits]",
+                   fqueue, fqueue_sync) {
+  using A = Api<TestType>;
+  // 30 push, then 60 times push + pop, then pop until empty.
+  std::vector<long> got;
+  TestType q;
+  A::init(&q);
+  auto op = [&](bool push, int x) {
+    TestType next;
+    long before = allocs;
+    REQUIRE((push ? A::push(&next, &q, x) : A::pop(&next, &q)) == FQUEUE_OK);
+    got.push_back(allocs - before);
+    A::destroy(&q);
+    q = next;
+  };
+  for (int i = 0; i < 30; ++i) op(true, i);
+  for (int i = 30; i < 90; ++i) {
+    op(true, i);
+    op(false, 0);
+  }
+  while (A::size(&q) > 0) op(false, 0);
+  A::destroy(&q);
+  REQUIRE(got == std::vector<long>(std::begin(schedule_expected), std::end(schedule_expected)));
 }

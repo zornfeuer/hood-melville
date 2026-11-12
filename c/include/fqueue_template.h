@@ -431,9 +431,9 @@ static void FQUEUE_IMPL_P(release)(FQUEUE_IMPL_NODE *n) {
 }
 
 // Nodes allocated ahead of an in-place operation, so that the operation
-// itself cannot fail. A rotation step allocates at most 3.
+// itself cannot fail. A rotation step allocates at most 2 (REVERSING).
 typedef struct {
-  FQUEUE_IMPL_NODE *nodes[3];
+  FQUEUE_IMPL_NODE *nodes[2];
   unsigned          n;
 } FQUEUE_IMPL_P(pool);
 
@@ -596,6 +596,8 @@ FQUEUE_IMPL_P(rotate_step_from)(FQUEUE_NAME *q, bool *overflow,
     if (q->rot.reversing.old_rear != NULL) return true;
 
     // Transition to APPENDING: extract fields before overwriting the union.
+    // The step ends here, like σ in docs/proof.md and step_mut in Rust: the
+    // first APPENDING step is the next operation's.
     FQUEUE_IMPL_NODE *acc   = q->rot.reversing.acc;
     FQUEUE_IMPL_NODE *rfacc = q->rot.reversing.rfacc;
     fqueue_impl_len   ok    = q->rot.reversing.ok;
@@ -603,6 +605,9 @@ FQUEUE_IMPL_P(rotate_step_from)(FQUEUE_NAME *q, bool *overflow,
     q->rot.appending.acc   = acc;
     q->rot.appending.rfacc = rfacc;
     q->rot.appending.ok    = ok;
+    // ok == 0: every element left in rfacc has been popped — done.
+    if (ok == 0) FQUEUE_IMPL_P(finish_rotation)(q);
+    return true;
   }
 
   // FQUEUE_IMPL_APPENDING
@@ -723,14 +728,8 @@ fqueue_status FQUEUE_IMPL_N(pop)(FQUEUE_NAME *FQUEUE_IMPL_RESTRICT out,
 static unsigned FQUEUE_IMPL_P(step_allocs)(const FQUEUE_IMPL_P(rotation) *r) {
   switch (r->tag) {
   case FQUEUE_IMPL_IDLE: return 0;
-  case FQUEUE_IMPL_REVERSING: {
-    bool has_front = r->reversing.old_front != NULL;
-    unsigned n = 1 + has_front;
-    if (r->reversing.old_rear->next != NULL) return n; // still reversing
-    // The same step goes on to APPENDING with the new rfacc.
-    bool has_rfacc = has_front || r->reversing.rfacc != NULL;
-    return n + (has_rfacc && r->reversing.ok != 0);
-  }
+  case FQUEUE_IMPL_REVERSING:
+    return 1 + (r->reversing.old_front != NULL);
   case FQUEUE_IMPL_APPENDING:
     return r->appending.rfacc != NULL && r->appending.ok != 0;
   }

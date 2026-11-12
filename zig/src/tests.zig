@@ -387,3 +387,83 @@ test "пул узлов: плиту не удалось выделить — Out
     q.deinit(a);
     try expectPoolEmptied(Q, a);
 }
+
+// Расписание ротации по операциям одинаково в C, Rust и Zig (#9): на одной
+// истории каждая персистентная операция создаёт одно и то же число узлов.
+// Последовательность — общая с rust/tests/schedule.rs и
+// c/tests/fqueue_limits_test.cxx.
+const schedule_expected = [_]usize{
+    2, 1, 3, 2, 2, 1, 3, 3, 3, 2, 2, 2, 2, 1, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 1,
+    3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 1, 0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 1, 2, 1, 2, 1, 2, 0, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+/// Аллокатор-обёртка, считающий выделения.
+const Counting = struct {
+    child: std.mem.Allocator,
+    allocs: usize = 0,
+
+    fn allocator(self: *Counting) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        self.allocs += 1;
+        return self.child.rawAlloc(len, alignment, ret);
+    }
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        return self.child.rawResize(memory, alignment, new_len, ret);
+    }
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        return self.child.rawRemap(memory, alignment, new_len, ret);
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(memory, alignment, ret);
+    }
+};
+
+test "расписание ротации совпадает с C и Rust" {
+    inline for (.{ root.Queue(i32), root.SyncQueue(i32) }) |Q| {
+        var counting: Counting = .{ .child = std.testing.allocator };
+        const a = counting.allocator();
+        var got: [schedule_expected.len]usize = undefined;
+        var k: usize = 0;
+        var q = Q.init();
+        defer q.deinit(a);
+        // 30 push, затем 60 раз push + pop, затем pop до пустой.
+        for (0..90) |i| {
+            {
+                const before = counting.allocs;
+                const next = try q.push(a, @intCast(i));
+                got[k] = counting.allocs - before;
+                k += 1;
+                q.deinit(a);
+                q = next;
+            }
+            if (i >= 30) {
+                const before = counting.allocs;
+                const next = (try q.pop(a)).?;
+                got[k] = counting.allocs - before;
+                k += 1;
+                q.deinit(a);
+                q = next;
+            }
+        }
+        while (!q.isEmpty()) {
+            const before = counting.allocs;
+            const next = (try q.pop(a)).?;
+            got[k] = counting.allocs - before;
+            k += 1;
+            q.deinit(a);
+            q = next;
+        }
+        try std.testing.expectEqual(schedule_expected.len, k);
+        try std.testing.expectEqualSlices(usize, &schedule_expected, &got);
+    }
+}
