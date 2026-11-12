@@ -1,0 +1,6 @@
+# Новые версии зависимостей (criterion, proptest, rayon, dhat) берутся не
+# раньше чем через неделю после публикации: защита от скомпрометированных
+# релизов. Версии из Cargo.lock не затрагиваются; обойти для одного пакета —
+# `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <name>`.
+[registry]
+global-min-publish-age = "7 days"

@@ -10,6 +10,11 @@ repository = "https://github.com/zornfeuer/hood-melville"
 keywords = ["queue", "persistent", "functional", "immutable", "data-structures"]
 categories = ["data-structures"]
 
+[lints.rust]
+# Ссылка, тут же превращённая в сырой указатель (`&x as *const _`), — в
+# модулях с `unsafe` (`node`, `pool`) лучше `&raw const`.
+raw_borrows_via_references = "warn"
+
 [dependencies]
 
 [dev-dependencies]

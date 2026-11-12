@@ -169,7 +169,7 @@ struct Guard<'a>(&'a ClassPool);
 impl Guard<'_> {
     fn inner(&mut self) -> &mut Inner {
         // SAFETY: блокировка наша, других ссылок на `inner` нет.
-        unsafe { &mut *self.0.inner.get() }
+        unsafe { self.0.inner.as_mut_unchecked() }
     }
 
     /// Положить пачку из `n` узлов (связаны словом 0, у последнего — null).
