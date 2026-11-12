@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <latch>
 #include <thread>
 #include <vector>
 
@@ -145,11 +146,22 @@ TEMPLATE_TEST_CASE("an exiting thread returns its cache and its slab",
   using P = Pool<TestType>;
   P::trim();
   // Short queues: the nodes stay in the thread's cache, the slab is barely
-  // carved; after the thread exits they still count as free.
+  // carved; after the thread exits they still count as free. The threads
+  // hold a queue each until all four have one, so that they overlap and
+  // each carves its own slab (otherwise, on few cores, a thread may exit
+  // and hand its slab to the next one before it starts).
   std::vector<std::thread> threads;
   std::vector<int> ok(4, 1);
+  std::latch all_live(4);
   for (int t = 0; t < 4; ++t)
-    threads.emplace_back([&ok, t] {
+    threads.emplace_back([&ok, &all_live, t] {
+      using A = Api<TestType>;
+      TestType q;
+      A::init(&q);
+      for (int i = 0; i < 50; ++i)
+        ok[t] &= A::push_in_place(&q, i) == FQUEUE_OK;
+      all_live.arrive_and_wait();
+      A::destroy(&q);
       for (int k = 0; k < 100; ++k)
         ok[t] &= fill_and_destroy<TestType>(50);
     });
