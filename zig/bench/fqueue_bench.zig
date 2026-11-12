@@ -1,5 +1,10 @@
 const std = @import("std");
-const Q = if (@import("bench_options").sync) @import("fqueue").SyncQueue(i32) else @import("fqueue").Queue(i32);
+const options = @import("bench_options");
+const fqueue = @import("fqueue");
+// С пулом узлов (docs/pool.md) — тот же API; c_allocator — источник плит.
+const Q = if (options.pool)
+    (if (options.sync) fqueue.SyncPooledQueue(i32) else fqueue.PooledQueue(i32))
+else if (options.sync) fqueue.SyncQueue(i32) else fqueue.Queue(i32);
 const allocator = std.heap.c_allocator;
 
 const Scenario = enum { fill, mixed, persistent, branching, fill_mut, mixed_mut };

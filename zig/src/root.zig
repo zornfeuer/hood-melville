@@ -22,11 +22,31 @@ pub fn SyncQueue(comptime T: type) type {
     return QueueWithOptions(T, .{ .atomic = true, .refs_limit = std.math.maxInt(u32) / 2 });
 }
 
+/// Очередь с узлами из пула (`docs/pool.md`): тот же API, узлы берутся из
+/// пула этого типа (плиты по 64 КиБ у переданного аллокатора, кэш у каждого
+/// потока) и возвращаются туда при обнулении счётчика. Аллокатор операций —
+/// источник плит: во все операции передавайте один и тот же. Пул держит
+/// память на пике живого множества до `node_pool.trim`; перед выходом потока —
+/// `node_pool.flushThreadCache()`.
+pub fn PooledQueue(comptime T: type) type {
+    return QueueWithOptions(T, .{ .nodes = .pool });
+}
+
+/// SyncQueue с узлами из пула.
+pub fn SyncPooledQueue(comptime T: type) type {
+    return QueueWithOptions(T, .{ .atomic = true, .refs_limit = std.math.maxInt(u32) / 2, .nodes = .pool });
+}
+
+/// Статистика пула узлов (`Q.node_pool.stats()`).
+pub const PoolStats = @import("pool.zig").Stats;
+
 /// Настройки предела ссылок, в том числе для проверки переполнения.
 pub const Options = struct {
     atomic: bool = false,
     /// Предел владеющих ссылок; для atomic мягкий (см. SyncQueue).
     refs_limit: u32 = std.math.maxInt(u32),
+    /// Где живут узлы: по одному у аллокатора или в пуле (`PooledQueue`).
+    nodes: enum { heap, pool } = .heap,
 };
 
 /// Очередь с заданным пределом счётчика ссылок (не меньше трёх).
@@ -42,6 +62,25 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
 
         /// Ошибки выделения памяти и переполнения длины или ссылок.
         pub const Error = Allocator.Error || error{Overflow};
+
+        const NodePool = @import("pool.zig").NodePool(Node);
+
+        /// Пул узлов этого типа (только `.nodes = .pool`): статистика, `trim`
+        /// (вернуть плиты аллокатору, если живых узлов нет) и сброс кэша
+        /// потока перед его выходом.
+        pub const node_pool = if (options.nodes == .pool) struct {
+            pub const stats = NodePool.stats;
+            pub const trim = NodePool.trim;
+            pub const flushThreadCache = NodePool.flushThreadCache;
+        } else struct {};
+
+        inline fn newNode(allocator: Allocator) Allocator.Error!*Node {
+            return if (options.nodes == .pool) NodePool.alloc(allocator) else allocator.create(Node);
+        }
+
+        inline fn freeNode(allocator: Allocator, n: *Node) void {
+            if (options.nodes == .pool) NodePool.free(allocator, n) else allocator.destroy(n);
+        }
         // Фаза ротации кодируется самими указателями, без тега (как ниша в
         // Rust): разворот идёт, пока непуст old_rear; дописывание — old_rear
         // исчерпан, acc непуст (в нём уже есть тыл); покой — все пусты. Вне
@@ -146,13 +185,13 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
                 if (!dropRef(n)) break;
                 cur = n.next;
                 touch(cur);
-                allocator.destroy(n);
+                freeNode(allocator, n);
             }
         }
 
         // cons забирает ссылку на хвост лишь после успешного выделения.
         fn prepend(allocator: Allocator, dst: *?*Node, value: T, pool: ?*Pool) Error!void {
-            const n = if (pool) |p| p.take() else try allocator.create(Node);
+            const n = if (pool) |p| p.take() else try newNode(allocator);
             n.* = .{ .value = value, .next = dst.* };
             dst.* = n;
         }
@@ -164,7 +203,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             const next = n.next;
             if (unique) {
                 touch(next);
-                allocator.destroy(n);
+                freeNode(allocator, n);
             } else {
                 // При переполнении ссылка остаётся у исходного поля.
                 try retainMode(next, unchecked);
@@ -294,7 +333,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
                 var pool: Pool = .{};
                 errdefer pool.deinit(allocator);
                 while (pool.count < count) : (pool.count += 1)
-                    pool.nodes[pool.count] = try allocator.create(Node);
+                    pool.nodes[pool.count] = try newNode(allocator);
                 return pool;
             }
 
@@ -305,7 +344,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             }
 
             fn deinit(self: *Pool, allocator: Allocator) void {
-                while (self.count > 0) allocator.destroy(self.take());
+                while (self.count > 0) freeNode(allocator, self.take());
                 self.* = undefined;
             }
         };
@@ -355,8 +394,8 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             // выделений задаёт порядок адресов узлов в списках: с тылом из
             // пула (последним выделенным) mixed_mut 10^7 был вдвое медленнее.
             // При отказе пула ссылка на прежний тыл остаётся у очереди.
-            const rear = try allocator.create(Node);
-            errdefer allocator.destroy(rear);
+            const rear = try newNode(allocator);
+            errdefer freeNode(allocator, rear);
             const old_front = if (starting) self.front_stack else self.rot.old_front;
             var pool = try Pool.init(allocator, stepAllocs(if (starting) .reversing else phase, old_front, self.ok));
             defer pool.deinit(allocator);

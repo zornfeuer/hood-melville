@@ -261,3 +261,129 @@ test "общие версии: параллельное ветвление, из
     for (&model, 0..) |*v, i| v.* = @intCast(i);
     for (versions, 0..) |q, size| try checkThread(q, model[0..size], allocator);
 }
+
+// Пул узлов (`docs/pool.md`). Пул — общий для типа очереди и держит плиты,
+// поэтому каждый тест в конце проверяет, что живых узлов нет, возвращает
+// плиты (`trim`) и кэш потока (`flushThreadCache`): проверка утечек
+// std.testing.allocator остаётся строгой.
+const root = @import("root.zig");
+
+fn expectPoolEmptied(comptime Q: type, allocator: std.mem.Allocator) !void {
+    const s = Q.node_pool.stats();
+    try std.testing.expectEqual(@as(usize, 0), s.live);
+    try std.testing.expectEqual(s.capacity, s.free);
+    Q.node_pool.flushThreadCache();
+    try std.testing.expectEqual(s.slab_bytes, Q.node_pool.trim(allocator));
+    try std.testing.expectEqual(@as(usize, 0), Q.node_pool.stats().slabs);
+}
+
+test "пул узлов: те же истории, что у очередей без пула" {
+    inline for (.{ root.PooledQueue(i32), root.SyncPooledQueue(i32) }) |Q| {
+        try Suite(Q).exhaustiveHistories();
+        try Suite(Q).sharedMutations();
+        try Suite(Q).branchingHistories();
+        try expectPoolEmptied(Q, std.testing.allocator);
+    }
+}
+
+test "пул узлов: статистика, удержание пика и trim" {
+    const Q = root.PooledQueue(i32);
+    const a = std.testing.allocator;
+    const per_slab = 65536 / 16 - 1;
+    var q = Q.init();
+    for (0..20000) |i| try q.pushInPlace(a, @intCast(i));
+    var s = Q.node_pool.stats();
+    try std.testing.expect(s.slabs > 0);
+    try std.testing.expectEqual(s.slabs * per_slab, s.capacity);
+    try std.testing.expectEqual(s.capacity, s.live + s.free);
+    try std.testing.expect(s.live >= 20000 and s.live <= 3 * 20000);
+    try std.testing.expectEqual(@as(usize, 0), Q.node_pool.trim(a)); // q жива
+
+    var c = try q.clone();
+    try std.testing.expectEqual(s.live, Q.node_pool.stats().live); // общие узлы
+    c.deinit(a);
+    // Сжатие: плиты остаются; рост снова — без новых плит.
+    const peak = s.slabs;
+    for (0..19800) |_| _ = try q.popInPlace(a);
+    try std.testing.expectEqual(peak, Q.node_pool.stats().slabs);
+    for (0..18000) |i| try q.pushInPlace(a, @intCast(i));
+    try std.testing.expectEqual(peak, Q.node_pool.stats().slabs);
+    q.deinit(a);
+    s = Q.node_pool.stats();
+    try std.testing.expectEqual(@as(usize, 0), s.live);
+    try std.testing.expect(s.spills > 0); // длинные освобождения переливались
+    try expectPoolEmptied(Q, a);
+}
+
+const PoolSync = root.SyncPooledQueue(i32);
+const PoolWorker = struct {
+    base: *const PoolSync,
+    allocator: std.mem.Allocator,
+    sum: i64 = 0,
+    failure: ?anyerror = null,
+
+    fn run(self: *@This()) void {
+        defer PoolSync.node_pool.flushThreadCache();
+        self.work() catch |err| {
+            self.failure = err;
+        };
+    }
+    fn work(self: *@This()) !void {
+        var q = try self.base.clone();
+        defer q.deinit(self.allocator);
+        while (try q.popInPlace(self.allocator)) |v| self.sum += v;
+        // Свои узлы: короткие очереди остаются в кэше потока до выхода.
+        for (0..100) |_| {
+            var r = PoolSync.init();
+            defer r.deinit(self.allocator);
+            for (0..50) |i| try r.pushInPlace(self.allocator, @intCast(i));
+        }
+    }
+};
+
+test "пул узлов: потоки разбирают общие версии, кэши возвращаются при выходе" {
+    var safe: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
+    defer std.testing.expect(safe.deinit() == .ok) catch @panic("queue leaked");
+    const allocator = safe.allocator();
+    const n = 30000;
+    var base = PoolSync.init();
+    for (0..n) |i| try base.pushInPlace(allocator, @intCast(i));
+    var workers: [4]PoolWorker = undefined;
+    var threads: [4]std.Thread = undefined;
+    var started: usize = 0;
+    defer for (threads[0..started]) |thread| thread.join();
+    for (&workers, &threads) |*worker, *thread| {
+        worker.* = .{ .base = &base, .allocator = allocator };
+        thread.* = try std.Thread.spawn(.{}, PoolWorker.run, .{worker});
+        started += 1;
+    }
+    for (threads[0..started]) |thread| thread.join();
+    started = 0;
+    base.deinit(allocator);
+    for (workers) |worker| {
+        if (worker.failure) |err| return err;
+        try std.testing.expectEqual(@as(i64, n * (n - 1) / 2), worker.sum);
+    }
+    try std.testing.expect(PoolSync.node_pool.stats().refills > 0 or PoolSync.node_pool.stats().spills > 0);
+    try expectPoolEmptied(PoolSync, allocator);
+}
+
+test "пул узлов: плиту не удалось выделить — OutOfMemory, очередь не меняется" {
+    // Отдельный тип — свой, пустой пул.
+    const Q = root.QueueWithOptions(i32, .{ .nodes = .pool, .refs_limit = std.math.maxInt(u32) - 1 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const a = failing.allocator();
+    var q = Q.init();
+    // Первое выделение — кэш потока, затем плита: отказ каждого.
+    for (0..2) |k| {
+        failing.fail_index = failing.alloc_index + k;
+        try std.testing.expectError(error.OutOfMemory, q.pushInPlace(a, 7));
+        try std.testing.expectEqual(@as(u32, 0), q.len());
+        try std.testing.expectError(error.OutOfMemory, q.push(a, 7));
+    }
+    failing.fail_index = std.math.maxInt(usize);
+    try q.pushInPlace(a, 7);
+    try std.testing.expectEqual(@as(?i32, 7), q.front());
+    q.deinit(a);
+    try expectPoolEmptied(Q, a);
+}

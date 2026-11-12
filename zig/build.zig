@@ -24,21 +24,26 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = true,
     }) });
     b.step("test-tsan", "Тесты с ThreadSanitizer").dependOn(&b.addRunArtifact(tsan).step);
-    inline for (.{ false, true }) |sync| {
-        const opts = b.addOptions();
-        opts.addOption(bool, "sync", sync);
-        const exe = b.addExecutable(.{
-            .name = if (sync) "fqueue_bench_sync" else "fqueue_bench",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/fqueue_bench.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-            }),
-        });
-        exe.root_module.addImport("fqueue", lib);
-        exe.root_module.addOptions("bench_options", opts);
-        b.installArtifact(exe);
+    // fqueue_bench[_pool][_sync]: очередь без пула и с пулом узлов
+    // (docs/pool.md), обычная и потокобезопасная.
+    inline for (.{ false, true }) |pool| {
+        inline for (.{ false, true }) |sync| {
+            const opts = b.addOptions();
+            opts.addOption(bool, "sync", sync);
+            opts.addOption(bool, "pool", pool);
+            const exe = b.addExecutable(.{
+                .name = "fqueue_bench" ++ (if (pool) "_pool" else "") ++ (if (sync) "_sync" else ""),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/fqueue_bench.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                }),
+            });
+            exe.root_module.addImport("fqueue", lib);
+            exe.root_module.addOptions("bench_options", opts);
+            b.installArtifact(exe);
+        }
     }
 
     const par = b.addExecutable(.{
