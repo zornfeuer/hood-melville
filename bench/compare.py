@@ -5,7 +5,7 @@
 - запуски чередуются: в каждом раунде все бинарники в случайном порядке, чтобы
   медленное состояние системы не доставалось целиком одной реализации;
 - для каждого запуска снимаются такты, инструкции, page reclaims и пиковая
-  память (`/usr/bin/time -l`) и время (perf_counter вокруг процесса);
+  память (как `/usr/bin/time -l`, см. run_once) и время (perf_counter вокруг процесса);
 - на больших N запуски одного бинарника распадаются на режимы с разным IPC
   (раскладка кучи libmalloc); режимы выделяются по наибольшему разрыву в
   отсортированных IPC и описываются отдельно — несовместимые распределения
@@ -15,6 +15,7 @@
 
 usage:
   compare.py [--rounds N] [--warmup K] [--seed S] [--out DIR]
+             [--env NAME:VAR=VALUE ...]
              --case fill:1000000 [--case ...] NAME=PATH [NAME=PATH ...]
 Первый бинарник — база для отношений.
 
@@ -27,32 +28,49 @@ usage:
 раскладкам.
 """
 import argparse
+import ctypes
 import json
 import os
 import random
-import re
 import statistics as st
 import subprocess
 import time
 
-TIME_FIELDS = {
-    'cycles': r'(\d+)\s+cycles elapsed',
-    'instructions': r'(\d+)\s+instructions retired',
-    'reclaims': r'(\d+)\s+page reclaims',
-    'peak': r'(\d+)\s+peak memory footprint',
-}
 MODE_GAP = 1.12  # соседние IPC, различающиеся сильнее, — разные режимы
 
 
-def run_once(path, scenario, n):
+# Счётчики процесса снимаются, как у /usr/bin/time -l: после выхода, но до
+# того, как процесс пожат (waitid с WNOWAIT, затем proc_pid_rusage). Сам
+# /usr/bin/time защищён SIP и вычищает DYLD_* из окружения, а подстановка
+# аллокатора (--env ...:DYLD_INSERT_LIBRARIES=...) должна дойти до бинарника.
+# Совпадает с time -l: инструкции в пределах 0.1%, пик памяти тот же.
+_libc = ctypes.CDLL('/usr/lib/libSystem.dylib', use_errno=True)
+P_PID, WEXITED, WNOWAIT = 1, 0x4, 0x20
+RUSAGE_INFO_V4 = 4
+RI_LIFETIME_MAX_PHYS_FOOTPRINT, RI_INSTRUCTIONS, RI_CYCLES = 30, 31, 32  # поля rusage_info_v4 по 8 байт
+
+
+def run_once(path, scenario, n, env=None):
     t0 = time.perf_counter()
-    proc = subprocess.run(['/usr/bin/time', '-l', path, scenario, str(n)],
-                          capture_output=True, text=True, check=True)
+    proc = subprocess.Popen([path, scenario, str(n)], stdout=subprocess.PIPE, text=True,
+                            env={**os.environ, **env} if env else None)
+    stdout = proc.stdout.read()
+    info = ctypes.create_string_buffer(128)  # siginfo_t
+    if _libc.waitid(P_PID, proc.pid, info, WEXITED | WNOWAIT) != 0:
+        raise OSError(ctypes.get_errno(), 'waitid')
+    ri = (ctypes.c_uint64 * 64)()
+    if _libc.proc_pid_rusage(proc.pid, RUSAGE_INFO_V4, ctypes.byref(ri)) != 0:
+        raise OSError(ctypes.get_errno(), 'proc_pid_rusage')
+    _, status, ru = os.wait4(proc.pid, 0)
+    proc.returncode = os.waitstatus_to_exitcode(status)
     wall = time.perf_counter() - t0
-    m = {k: int(re.search(rx, proc.stderr).group(1)) for k, rx in TIME_FIELDS.items()}
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, [path, scenario, str(n)])
+    m = {'cycles': ri[RI_CYCLES], 'instructions': ri[RI_INSTRUCTIONS],
+         'reclaims': ru.ru_minflt, 'peak': ri[RI_LIFETIME_MAX_PHYS_FOOTPRINT]}
     m['wall_ms'] = wall * 1e3
     m['ipc'] = m['instructions'] / m['cycles']
-    m['checksum'] = proc.stdout.strip()
+    m['checksum'] = stdout.strip()
     return m
 
 
@@ -113,9 +131,16 @@ def main():
     ap.add_argument('--out', default='bench-results')
     ap.add_argument('--settle', type=int, default=0,
                     help='ждать до N секунд, пока load average не опустится ниже 1.5')
+    ap.add_argument('--env', action='append', default=[], metavar='NAME:VAR=VALUE',
+                    help='переменная окружения для бинарника NAME (например, подстановка аллокатора)')
     ap.add_argument('bins', nargs='+')
     args = ap.parse_args()
     bins = [b.split('=', 1) for b in args.bins]
+    envs = {}
+    for e in args.env:
+        name, kv = e.split(':', 1)
+        var, val = kv.split('=', 1)
+        envs.setdefault(name, {})[var] = val
     rng = random.Random(args.seed)
     os.makedirs(args.out, exist_ok=True)
     deadline = time.time() + args.settle
@@ -133,13 +158,13 @@ def main():
         scenario, n = case.split(':')
         for name, path in bins:
             for _ in range(args.warmup):
-                run_once(path, scenario, n)
+                run_once(path, scenario, n, envs.get(name))
         runs = {name: [] for name, _ in bins}
         for rnd in range(args.rounds):
             order = bins[:]
             rng.shuffle(order)
             for pos, (name, path) in enumerate(order):
-                m = run_once(path, scenario, n)
+                m = run_once(path, scenario, n, envs.get(name))
                 m.update(round=rnd, position=pos)
                 runs[name].append(m)
         sums = {r['checksum'] for rs in runs.values() for r in rs}

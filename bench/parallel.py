@@ -36,9 +36,9 @@ TASKS, OPS = 256, 40000  # share: всего операций TASKS * OPS
 SNAP_OPS = 2 * 1000000    # snapshot: операций писателя (SNAP_PAIRS пар)
 
 
-def run_once(path, args):
-    out = subprocess.run([path, *map(str, args)],
-                         capture_output=True, text=True, check=True).stdout.split()
+def run_once(path, args, env=None):
+    out = subprocess.run([path, *map(str, args)], capture_output=True, text=True, check=True,
+                         env={**os.environ, **env} if env else None).stdout.split()
     return out[0], [int(x) for x in out[1:]]
 
 
@@ -64,9 +64,16 @@ def main():
     ap.add_argument('--settle', type=float, default=0,
                     help='пауза перед замерами, с (остывание после сборки)')
     ap.add_argument('--out', default=None)
+    ap.add_argument('--env', action='append', default=[], metavar='NAME:VAR=VALUE',
+                    help='переменная окружения для бинарника NAME (например, подстановка аллокатора)')
     ap.add_argument('bins', nargs='+')
     a = ap.parse_args()
     bins = [b.split('=', 1) for b in a.bins]
+    envs = {}
+    for e in a.env:
+        name, kv = e.split(':', 1)
+        var, val = kv.split('=', 1)
+        envs.setdefault(name, {})[var] = val
     modes = a.modes.split(',')
     names = [n for n, _ in bins]
     combos = [(name, path, ('share', m, s, p)) for name, path in bins for m in modes
@@ -82,7 +89,7 @@ def main():
         order = combos[:]
         random.shuffle(order)
         for name, path, args in order:
-            h, vals = run_once(path, args)
+            h, vals = run_once(path, args, envs.get(name))
             key = args[2] if args[0] == 'share' else 'snapshot'
             if sums.setdefault(key, h) != h:
                 raise SystemExit(f'контрольная сумма {name} {args}: {h} != {sums[key]}')

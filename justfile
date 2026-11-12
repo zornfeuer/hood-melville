@@ -86,6 +86,8 @@ bench_cases := "--case fill:1000000 --case mixed:1000000 --case persistent:10000
 # Отдельный бенчмарк операций на месте (fill_mut, mixed_mut) рядом с теми же
 # историями через персистентные операции.
 bench_cases_mut := "--case fill:1000000 --case fill_mut:1000000 --case mixed:1000000 --case mixed_mut:1000000 --case fill:10000000 --case fill_mut:10000000 --case mixed:10000000 --case mixed_mut:10000000"
+# Сетка аллокаторов (#8): персистентные и на месте, без повторов.
+bench_cases_alloc := bench_cases + " --case fill_mut:1000000 --case mixed_mut:1000000 --case fill_mut:10000000 --case mixed_mut:10000000"
 
 # Варианты раскладки кода (выравнивание функций и циклов, байт). Склонность к
 # медленному режиму аллокатора зависит от раскладки сборки, поэтому реализации
@@ -205,6 +207,67 @@ bench-par-build: zig-build
 bench-par rounds="5" modes="pool,threads": bench-par-build
     python3 -I bench/parallel.py --settle 60 --rounds {{rounds}} --modes {{modes}} \
         --out bench-results/parallel C=build/par/C Rust=build/par/Rust Zig=build/par/Zig
+
+# --- Аллокаторы (#8) ----------------------------------------------------------
+
+# Системный malloc, mimalloc и jemalloc (brew install mimalloc jemalloc) у всех
+# трёх реализаций: те же бинарники, аллокатор подставляется через
+# DYLD_INSERT_LIBRARIES. mimalloc перехватывает вызовы сам; jemalloc — через
+# прокладку bench/alloc/jemalloc_interpose.c (без неё free идёт через поиск
+# зоны libmalloc, docs/benchmarks.md).
+
+# Прокладка jemalloc: build/alloc/jemalloc_interpose.dylib.
+alloc-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    jp=$(brew --prefix jemalloc)
+    mkdir -p build/alloc
+    cc -O2 -dynamiclib -I"$jp/include" -DJEMALLOC_DYLIB="\"$jp/lib/libjemalloc.2.dylib\"" \
+        -o build/alloc/jemalloc_interpose.dylib bench/alloc/jemalloc_interpose.c \
+        -lSystem -L"$jp/lib" -ljemalloc 2>&1 | grep -v 'duplicate libraries' || true
+
+# Однопоточная сетка «язык × аллокатор» по 4 раскладкам; сводка — alloc_report.py.
+bench-alloc rounds="6": alloc-build (bench-layouts "alloc")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mi=$(brew --prefix mimalloc)/lib/libmimalloc.dylib
+    je=$PWD/build/alloc/jemalloc_interpose.dylib
+    bins=(); envs=()
+    for impl in C Rust Zig; do
+        for al in sys mi je; do
+            for a in {{bench_layouts}}; do
+                n="$impl-$al/al$a"
+                bins+=("$n=build/bench-layout/alloc/$impl-al$a")
+                case $al in
+                    mi) envs+=(--env "$n:DYLD_INSERT_LIBRARIES=$mi") ;;
+                    je) envs+=(--env "$n:DYLD_INSERT_LIBRARIES=$je") ;;
+                esac
+            done
+        done
+    done
+    python3 -I bench/compare.py --settle 60 --rounds {{rounds}} --out bench-results/alloc-single \
+        "${envs[@]}" {{bench_cases_alloc}} "${bins[@]}"
+    python3 -I bench/alloc_report.py bench-results/alloc-single/compare.json
+
+# Параллельная нагрузка с тремя аллокаторами (режим pool и snapshot).
+bench-alloc-par rounds="5": alloc-build bench-par-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mi=$(brew --prefix mimalloc)/lib/libmimalloc.dylib
+    je=$PWD/build/alloc/jemalloc_interpose.dylib
+    bins=(); envs=()
+    for impl in C Rust Zig; do
+        for al in sys mi je; do
+            bins+=("$impl-$al=build/par/$impl")
+            case $al in
+                mi) envs+=(--env "$impl-$al:DYLD_INSERT_LIBRARIES=$mi") ;;
+                je) envs+=(--env "$impl-$al:DYLD_INSERT_LIBRARIES=$je") ;;
+            esac
+        done
+    done
+    python3 -I bench/parallel.py --settle 60 --rounds {{rounds}} --modes pool \
+        --shares 0,1,5,50 --threads 1,4,10 --readers 0,1,4,9 \
+        --out bench-results/alloc-par "${envs[@]}" "${bins[@]}"
 
 # A/B двух наборов раскладок одной реализации (собранных bench-layouts <label>):
 # just bench-ab-layouts ctl exp Rust [rounds].
