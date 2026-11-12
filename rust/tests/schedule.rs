@@ -81,7 +81,5 @@ const EXPECTED: [usize; 180] = [
 #[test]
 fn rotation_schedule_matches_c_and_zig() {
     let got = schedule();
-    if got[..] != EXPECTED[..] {
-        panic!("расписание: {got:?}");
-    }
+    assert!(got[..] == EXPECTED[..], "расписание: {got:?}");
 }
