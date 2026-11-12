@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 use std::thread;
 
 use hood_melville::pool::{self, PoolStats};
@@ -202,9 +202,17 @@ fn exiting_threads_return_caches() {
     let _g = serial();
     pool::trim();
     let rounds = if cfg!(miri) { 3 } else { 100 };
+    // Каждый поток держит очередь, пока она есть у всех четырёх: потоки
+    // гарантированно пересекаются и берут по своей плите (иначе на малом
+    // числе ядер поток успевал завершиться и отдать плиту следующему).
+    let all_live = Arc::new(Barrier::new(4));
     let threads: Vec<_> = (0..4)
         .map(|_| {
+            let all_live = Arc::clone(&all_live);
             thread::spawn(move || {
+                let held: PooledQueue<u32> = (0..50).collect();
+                all_live.wait();
+                drop(held);
                 for _ in 0..rounds {
                     let q: PooledQueue<u32> = (0..50).collect();
                     assert_eq!(q.len(), 50);
