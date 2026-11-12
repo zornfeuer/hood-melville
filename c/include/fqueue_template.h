@@ -47,9 +47,21 @@
 // have the same signatures. FQUEUE_ATOMIC makes this instantiation thread-safe
 // (see Threads); it affects only the definitions, not the declarations.
 //
+// Node pool. With FQUEUE_NODE_POOL defined for both includes (it changes the
+// declarations too), nodes come from a pool of this instantiation instead of
+// one FQUEUE_MALLOC per node: slabs of 64 KiB from FQUEUE_MALLOC, a cache of
+// free nodes per thread (POSIX threads). The queue API and its guarantees are
+// the same; a pool slab that cannot be allocated is FQUEUE_NOMEM. Slabs are
+// not returned while a node is live — the pool keeps the peak of live nodes —
+// until NAME_pool_trim; it is the library's only global state. Specification
+// and trade-offs: docs/pool.md. fqueue.h provides fqueue_pooled and
+// fqueue_pooled_sync.
+//
 // Threads. Without FQUEUE_ATOMIC, versions that share nodes must not be used
 // concurrently, even for reading: reference counts are not atomic. Versions
-// with no common history are independent; the library has no global state.
+// with no common history are independent; the library has no global state
+// (except the node pool of FQUEUE_NODE_POOL instantiations, which is
+// thread-safe for any of them).
 // With FQUEUE_ATOMIC (C11 atomics, memory orders as Arc in Rust), any number
 // of threads may concurrently read a version and derive new versions from it
 // (NAME_clone, NAME_push, NAME_pop with it as `q`, NAME_front, ...), even if
@@ -58,7 +70,8 @@
 // iterator) must not race with other accesses to that same object. The
 // reference limit is then soft: concurrent operations may take a count
 // slightly above it, and the limit is UINT32_MAX / 2, so counts never wrap.
-// fqueue.h provides both: fqueue (single-threaded) and fqueue_sync.
+// fqueue.h provides both: fqueue (single-threaded) and fqueue_sync (and the
+// same with a node pool: fqueue_pooled, fqueue_pooled_sync).
 //
 // Complexity: everything except NAME_destroy is worst-case O(1) (at most 3 new
 // nodes per push and 2 per pop). NAME_destroy is not: it frees every node the
@@ -211,6 +224,16 @@ fqueue_status FQUEUE_IMPL_N(iter_next)(FQUEUE_IMPL_N(iter)* it,
 // Release the iterator, at any point of the iteration.
 FQUEUE_API void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter)* it);
 
+#ifdef FQUEUE_NODE_POOL
+// Statistics of this instantiation's node pool.
+FQUEUE_API void FQUEUE_IMPL_N(pool_stats)(fqueue_pool_stats* stats);
+
+// Return every slab of the pool to FQUEUE_FREE if no node is live (every
+// version of this type destroyed); otherwise do nothing. Returns the bytes
+// returned. No other thread may use the pool meanwhile.
+FQUEUE_API size_t FQUEUE_IMPL_N(pool_trim)(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
@@ -271,6 +294,16 @@ void  FQUEUE_FREE(void *ptr);
 #define FQUEUE_IMPL_ALWAYS_INLINE inline
 #define FQUEUE_IMPL_COLD
 #endif
+#if defined(__SANITIZE_THREAD__)
+#define FQUEUE_IMPL_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define FQUEUE_IMPL_TSAN 1
+#endif
+#endif
+#ifndef FQUEUE_IMPL_TSAN
+#define FQUEUE_IMPL_TSAN 0
+#endif
 #endif // FQUEUE_IMPL_CONFIGURED
 
 struct FQUEUE_IMPL_NODE {
@@ -282,6 +315,33 @@ struct FQUEUE_IMPL_NODE {
 #endif
   struct FQUEUE_IMPL_NODE *next;
 };
+
+// Where nodes come from: FQUEUE_MALLOC/FQUEUE_FREE per node, or the pool of
+// this instantiation (fqueue_pool_impl.h, docs/pool.md).
+#ifdef FQUEUE_NODE_POOL
+#include "fqueue_pool_impl.h"
+_Static_assert(sizeof(FQUEUE_IMPL_NODE) >= 2 * sizeof(void *),
+               "a free pool node holds two pointers");
+static fqueue_impl_npool FQUEUE_IMPL_P(node_pool) = FQUEUE_IMPL_NPOOL_INIT(FQUEUE_IMPL_NODE);
+static _Thread_local fqueue_impl_npool_cache *FQUEUE_IMPL_P(node_pool_cache);
+#define FQUEUE_IMPL_NODE_NEW()                                                 \
+  ((FQUEUE_IMPL_NODE *)fqueue_impl_npool_alloc(&FQUEUE_IMPL_P(node_pool),      \
+                                               &FQUEUE_IMPL_P(node_pool_cache)))
+#define FQUEUE_IMPL_NODE_DELETE(n)                                             \
+  fqueue_impl_npool_free(&FQUEUE_IMPL_P(node_pool),                            \
+                         &FQUEUE_IMPL_P(node_pool_cache), (n))
+
+void FQUEUE_IMPL_N(pool_stats)(fqueue_pool_stats *stats) {
+  fqueue_impl_npool_stats(&FQUEUE_IMPL_P(node_pool), stats);
+}
+
+size_t FQUEUE_IMPL_N(pool_trim)(void) {
+  return fqueue_impl_npool_trim(&FQUEUE_IMPL_P(node_pool));
+}
+#else
+#define FQUEUE_IMPL_NODE_NEW()     ((FQUEUE_IMPL_NODE *)FQUEUE_MALLOC(sizeof(FQUEUE_IMPL_NODE)))
+#define FQUEUE_IMPL_NODE_DELETE(n) FQUEUE_FREE(n)
+#endif
 
 // Reference count primitives. Atomic memory orders are those of Arc in Rust:
 // a new reference is made from an existing one, so the increment is relaxed;
@@ -309,7 +369,13 @@ static inline uint32_t FQUEUE_IMPL_P(refs_inc)(FQUEUE_IMPL_NODE *n) {
 static inline bool FQUEUE_IMPL_P(refs_dec)(FQUEUE_IMPL_NODE *n) {
   if (atomic_fetch_sub_explicit(&n->refcount, 1, memory_order_release) != 1)
     return false;
+#if FQUEUE_IMPL_TSAN
+  // ThreadSanitizer does not model fences; an acquire load of the count
+  // synchronizes the same way (as Arc in Rust does under TSan).
+  (void)atomic_load_explicit(&n->refcount, memory_order_acquire);
+#else
   atomic_thread_fence(memory_order_acquire);
+#endif
   return true;
 }
 // Load the count (and discard it) so that its cache line arrives early.
@@ -359,7 +425,7 @@ static void FQUEUE_IMPL_P(release)(FQUEUE_IMPL_NODE *n) {
   while (n && FQUEUE_IMPL_P(refs_dec)(n)) {
     FQUEUE_IMPL_NODE *next = n->next;
     if (next) FQUEUE_IMPL_P(touch)(next);
-    FQUEUE_FREE(n);
+    FQUEUE_IMPL_NODE_DELETE(n);
     n = next;
   }
 }
@@ -383,7 +449,7 @@ FQUEUE_IMPL_P(cons)(FQUEUE_T value, FQUEUE_IMPL_NODE *next,
     assert(pool->n > 0);
     n = pool->nodes[--pool->n];
   } else {
-    n = (FQUEUE_IMPL_NODE *)FQUEUE_MALLOC(sizeof *n);
+    n = FQUEUE_IMPL_NODE_NEW();
     if (!n) return NULL;
   }
   n->value    = value;
@@ -453,7 +519,7 @@ static FQUEUE_IMPL_NODE *FQUEUE_IMPL_P(advance)(FQUEUE_IMPL_NODE *n,
   FQUEUE_IMPL_NODE *next = n->next;
   if (FQUEUE_IMPL_P(refs_unique)(n)) {
     if (next) FQUEUE_IMPL_P(touch)(next);
-    FQUEUE_FREE(n);
+    FQUEUE_IMPL_NODE_DELETE(n);
     return next;
   }
 #ifdef FQUEUE_ATOMIC
@@ -673,10 +739,10 @@ static unsigned FQUEUE_IMPL_P(step_allocs)(const FQUEUE_IMPL_P(rotation) *r) {
 
 static bool FQUEUE_IMPL_P(pool_fill)(FQUEUE_IMPL_P(pool) *p, unsigned n) {
   for (p->n = 0; p->n < n; p->n++) {
-    p->nodes[p->n] = (FQUEUE_IMPL_NODE *)FQUEUE_MALLOC(sizeof(FQUEUE_IMPL_NODE));
+    p->nodes[p->n] = FQUEUE_IMPL_NODE_NEW();
     if (!p->nodes[p->n]) {
       while (p->n > 0)
-        FQUEUE_FREE(p->nodes[--p->n]);
+        FQUEUE_IMPL_NODE_DELETE(p->nodes[--p->n]);
       return false;
     }
   }
@@ -754,7 +820,7 @@ fqueue_status FQUEUE_IMPL_N(push_in_place)(FQUEUE_NAME *q, FQUEUE_T value) {
                       .ok        = q->front_len}};
   FQUEUE_IMPL_P(pool) pool;
   if (!FQUEUE_IMPL_P(pool_fill)(&pool, FQUEUE_IMPL_P(step_allocs)(&r))) {
-    FQUEUE_FREE(rear); // the reference to q->rear stays with q
+    FQUEUE_IMPL_NODE_DELETE(rear); // the reference to q->rear stays with q
     return FQUEUE_NOMEM;
   }
 
@@ -849,7 +915,10 @@ void FQUEUE_IMPL_N(iter_destroy)(FQUEUE_IMPL_N(iter) *it) {
 #undef FQUEUE_IMPL_P
 #undef FQUEUE_IMPL_NODE
 #undef FQUEUE_IMPL_LIMIT
+#undef FQUEUE_IMPL_NODE_NEW
+#undef FQUEUE_IMPL_NODE_DELETE
 #undef FQUEUE_ATOMIC
+#undef FQUEUE_NODE_POOL
 #undef FQUEUE_NAME
 #undef FQUEUE_T
 #undef FQUEUE_IMPLEMENTATION

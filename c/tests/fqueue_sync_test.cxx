@@ -1,6 +1,6 @@
 // fqueue_sync (FQUEUE_ATOMIC): the same semantics as fqueue — checked by
-// running the exhaustive model test for both instantiations — plus use from
-// several threads. Run under ThreadSanitizer with `just c-tsan`.
+// running the exhaustive model test for every instantiation — plus use from
+// several threads, also with the node pool (fqueue_pooled_sync). Run under ThreadSanitizer with `just c-tsan`.
 
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -49,8 +49,8 @@ static void explore(const Q *q, std::deque<int> &model, int depth, long &states)
   A::destroy(&child);
 }
 
-TEMPLATE_TEST_CASE("both instantiations match a model on all short histories",
-                   "[sync]", fqueue, fqueue_sync) {
+TEMPLATE_TEST_CASE("all instantiations match a model on all short histories",
+                   "[sync]", fqueue, fqueue_sync, fqueue_pooled, fqueue_pooled_sync) {
   using A = Api<TestType>;
   TestType q;
   A::init(&q);
@@ -68,14 +68,15 @@ static uint64_t xorshift(uint64_t &x) {
   return x;
 }
 
-TEST_CASE("threads derive versions from shared fqueue_sync versions", "[sync]") {
-  using A = Api<fqueue_sync>;
+TEMPLATE_TEST_CASE("threads derive versions from shared versions", "[sync]",
+                   fqueue_sync, fqueue_pooled_sync) {
+  using A = Api<TestType>;
   // Shared versions in different rotation states, with their models.
-  std::vector<fqueue_sync> shared(1);
+  std::vector<TestType> shared(1);
   A::init(&shared[0]);
   std::vector<std::deque<int>> models{{}};
   for (int i = 0; i < 40; ++i) {
-    fqueue_sync next;
+    TestType next;
     std::deque<int> m = models.back();
     if (i % 3 == 2) {
       REQUIRE(A::pop(&next, &shared.back()) == FQUEUE_OK);
@@ -98,7 +99,7 @@ TEST_CASE("threads derive versions from shared fqueue_sync versions", "[sync]") 
       uint64_t x = 0x9E3779B97F4A7C15u ^ (uint64_t)(t + 1);
       for (int k = 0; k < ROUNDS && !failures[t]; ++k) {
         size_t idx = xorshift(x) % shared.size();
-        fqueue_sync q;
+        TestType q;
         if (A::clone(&q, &shared[idx]) != FQUEUE_OK) { failures[t] = 1; break; }
         std::deque<int> m = models[idx];
         for (int j = 0; j < 4; ++j) {
@@ -109,7 +110,7 @@ TEST_CASE("threads derive versions from shared fqueue_sync versions", "[sync]") 
             if (m.empty() ? s != FQUEUE_EMPTY : (s != FQUEUE_OK || v != m.front())) failures[t] = 2;
             if (!m.empty()) m.pop_front();
           } else {
-            fqueue_sync next; // persistent push from q, then in place
+            TestType next; // persistent push from q, then in place
             if (A::push(&next, &q, value) != FQUEUE_OK) failures[t] = 3;
             A::destroy(&q);
             q = next;
@@ -142,14 +143,15 @@ TEST_CASE("threads derive versions from shared fqueue_sync versions", "[sync]") 
   }
 }
 
-TEST_CASE("fqueue_sync versions are destroyed in other threads", "[sync]") {
-  using A = Api<fqueue_sync>;
+TEMPLATE_TEST_CASE("versions are destroyed in other threads", "[sync]",
+                   fqueue_sync, fqueue_pooled_sync) {
+  using A = Api<TestType>;
   enum { N = 20000, VERSIONS = 8 };
-  fqueue_sync base;
+  TestType base;
   A::init(&base);
   for (int i = 0; i < N; ++i)
     REQUIRE(A::push_in_place(&base, i) == FQUEUE_OK);
-  std::vector<fqueue_sync> versions(VERSIONS);
+  std::vector<TestType> versions(VERSIONS);
   for (int i = 0; i < VERSIONS; ++i) {
     REQUIRE(A::clone(&versions[i], &base) == FQUEUE_OK);
     for (int k = 0; k < i * N / VERSIONS; ++k)
@@ -157,27 +159,28 @@ TEST_CASE("fqueue_sync versions are destroyed in other threads", "[sync]") {
   }
   A::destroy(&base);
   std::vector<std::thread> threads;
-  for (fqueue_sync &v : versions)
-    threads.emplace_back([&v] { Api<fqueue_sync>::destroy(&v); });
+  for (TestType &v : versions)
+    threads.emplace_back([&v] { Api<TestType>::destroy(&v); });
   for (std::thread &th : threads)
     th.join();
 }
 
-TEST_CASE("threads read shared nodes, the last owner frees them", "[sync]") {
+TEMPLATE_TEST_CASE("threads read shared nodes, the last owner frees them",
+                   "[sync]", fqueue_sync, fqueue_pooled_sync) {
   // Every thread walks its own clone of one version (reading value and next of
   // shared nodes, advancing past them) and destroys it; the nodes are freed by
   // whichever thread drops the last reference, after the others have read
   // them. Without release/acquire on the counts, ThreadSanitizer reports the
   // free racing with those reads.
-  using A = Api<fqueue_sync>;
+  using A = Api<TestType>;
   enum { N = 2000, THREADS = 8, ROUNDS = 20 };
   for (int round = 0; round < ROUNDS; ++round) {
-    fqueue_sync base;
+    TestType base;
     A::init(&base);
     for (int i = 0; i < N; ++i)
       REQUIRE(A::push_in_place(&base, i) == FQUEUE_OK);
-    std::vector<fqueue_sync> clones(THREADS);
-    for (fqueue_sync &c : clones)
+    std::vector<TestType> clones(THREADS);
+    for (TestType &c : clones)
       REQUIRE(A::clone(&c, &base) == FQUEUE_OK);
     A::destroy(&base);
     std::vector<long> sums(THREADS, 0);

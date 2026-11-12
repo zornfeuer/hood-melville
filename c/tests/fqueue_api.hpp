@@ -1,6 +1,6 @@
-// The two instantiations of fqueue.h behind one interface, so that a test can
-// run for both: Api<fqueue>::push is fqueue_push, Api<fqueue_sync>::push is
-// fqueue_sync_push, and so on.
+// The instantiations of fqueue.h behind one interface, so that a test can run
+// for all of them: Api<fqueue>::push is fqueue_push, Api<fqueue_sync>::push is
+// fqueue_sync_push, and so on (fqueue_pooled, fqueue_pooled_sync: node pool).
 #pragma once
 
 #include <catch2/catch_test_macros.hpp>
@@ -31,6 +31,8 @@ template <class Q> struct Api;
 
 FQUEUE_TEST_API(fqueue)
 FQUEUE_TEST_API(fqueue_sync)
+FQUEUE_TEST_API(fqueue_pooled)
+FQUEUE_TEST_API(fqueue_pooled_sync)
 
 #undef FQUEUE_TEST_API
 

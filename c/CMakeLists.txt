@@ -38,6 +38,7 @@ if(HOOD_MELVILLE_INSTALL)
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(FILES include/fqueue.h include/fqueue_common.h include/fqueue_template.h
+        include/fqueue_pool_impl.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     set(HOOD_MELVILLE_CMAKE_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/hood_melville)
     install(EXPORT hood_melville_targets
@@ -70,7 +71,7 @@ if(HOOD_MELVILLE_BUILD_TESTS)
     enable_testing()
 
     add_executable(fqueue_test tests/fqueue_test.cxx tests/fqueue_generic_test.cxx
-        tests/fqueue_generic.c tests/fqueue_sync_test.cxx)
+        tests/fqueue_generic.c tests/fqueue_sync_test.cxx tests/fqueue_pool_test.cxx)
     find_package(Threads REQUIRED)
     target_link_libraries(fqueue_test PRIVATE Threads::Threads)
     target_link_libraries(fqueue_test PRIVATE fqueue Catch2::Catch2WithMain)

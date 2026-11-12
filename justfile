@@ -16,7 +16,7 @@ c-tsan:
         -DCMAKE_C_FLAGS="-fsanitize=thread" -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" > /dev/null
     cmake --build build/c-tsan --target fqueue_test
-    ./build/c-tsan/fqueue_test "[sync]"
+    ./build/c-tsan/fqueue_test "[sync],[pool]"
 
 # C-тесты под AddressSanitizer и UBSan.
 c-asan:

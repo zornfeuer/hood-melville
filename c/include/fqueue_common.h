@@ -44,6 +44,20 @@ static inline const char* fqueue_strerror(fqueue_status status) {
   return "unknown fqueue status";
 }
 
+// Statistics of a node pool (FQUEUE_NODE_POOL instantiations, NAME_pool_stats;
+// docs/pool.md). Approximate while other threads use the pool.
+typedef struct fqueue_pool_stats {
+  size_t   slabs;       // slabs held by the pool
+  size_t   slab_bytes;  // their total size
+  size_t   capacity;    // nodes in them
+  size_t   free;        // of these, free: in thread caches, uncarved, global
+  size_t   live;        // of these, in use: capacity - free
+  uint64_t slab_allocs; // slabs ever allocated (calls to the system allocator)
+  uint64_t slab_frees;  // slabs ever returned (by NAME_pool_trim)
+  uint64_t spills;      // batches given by thread caches to the global stack
+  uint64_t refills;     // batches taken from it
+} fqueue_pool_stats;
+
 // Private: lengths and the rotation counter `ok` (the same type as `Len` in
 // Rust), and the phase of a rotation.
 typedef uint32_t fqueue_impl_len;

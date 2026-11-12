@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <type_traits>
 #include <algorithm>
 #include <cstdlib>
 #include <deque>
@@ -494,5 +495,55 @@ TEMPLATE_TEST_CASE("too many references report FQUEUE_OVERFLOW in both "
       A::destroy(&c);
     A::destroy(&q);
   }
+  REQUIRE(live == start);
+}
+
+TEMPLATE_TEST_CASE("a pool slab that cannot be allocated is FQUEUE_NOMEM",
+                   "[limits][pool]", fqueue_pooled, fqueue_pooled_sync) {
+  using A = Api<TestType>;
+  auto trim = [] {
+    if constexpr (std::is_same_v<TestType, fqueue_pooled>)
+      return fqueue_pooled_pool_trim();
+    else
+      return fqueue_pooled_sync_pool_trim();
+  };
+  // The thread's cache (allocated once, kept) exists before counting.
+  {
+    TestType w;
+    A::init(&w);
+    REQUIRE(A::push_in_place(&w, 0) == FQUEUE_OK);
+    A::destroy(&w);
+  }
+  trim();
+  long start = live;
+  // An empty pool: the first node needs a slab, and so does every
+  // operation until one succeeds.
+  TestType q;
+  A::init(&q);
+  long failures = 0;
+  for (int i = 0; i < 3; ++i) {
+    std::vector<int> expected(i);
+    for (int k = 0; k < i; ++k) expected[k] = k;
+    TestType out;
+    failures += op_under_oom(
+        [i](TestType *o, const TestType *p) { return A::push(o, p, i); }, &out, &q,
+        expected);
+    A::destroy(&q);
+    q = out;
+  }
+  REQUIRE(failures == 1); // only the first push takes a slab
+  // In place: fails before changing q.
+  A::destroy(&q);
+  trim();
+  A::init(&q);
+  arm(0);
+  REQUIRE(A::push_in_place(&q, 7) == FQUEUE_NOMEM);
+  disarm();
+  REQUIRE(injected);
+  REQUIRE(A::size(&q) == 0);
+  REQUIRE(A::push_in_place(&q, 7) == FQUEUE_OK);
+  REQUIRE(contents_of(&q) == std::vector<int>{7});
+  A::destroy(&q);
+  REQUIRE(trim() > 0);
   REQUIRE(live == start);
 }
