@@ -1,19 +1,19 @@
-//! Пул узлов — альтернативное хранение узлов (`docs/pool.md`; C и Zig
+//! Пул узлов — альтернативный аллокатор узлов (`docs/pool.md`; C и Zig
 //! следуют тому же алгоритму с теми же константами).
 //!
-//! Очередь с пулом — [`PooledQueue`](crate::PooledQueue) (`Queue<T,
-//! Pooled<Local>>`) и [`SyncPooledQueue`](crate::SyncPooledQueue)
-//! (`Queue<T, Pooled<Atomic>>`): семантика, счётчики ссылок и освобождение
-//! узла при обнулении счётчика — те же, но узел уходит в пул, а не в
-//! глобальный аллокатор. Память берётся плитами по 65 536 байт у глобального
-//! аллокатора и не возвращается, пока в пуле есть живой узел: пул держит пик
-//! живого множества до [`trim`].
+//! [`NodePool`] реализует [`Allocator`]: очередь с пулом — `Queue<T, R,
+//! NodePool>`, для краткости [`PooledQueue`](crate::PooledQueue) и
+//! [`SyncPooledQueue`](crate::SyncPooledQueue). Семантика, счётчики ссылок и
+//! освобождение узла при обнулении счётчика — те же, но узел уходит в пул, а
+//! не в глобальный аллокатор. Память берётся плитами по 65 536 байт у
+//! глобального аллокатора и не возвращается, пока в пуле есть живой узел:
+//! пул держит пик живого множества до [`trim`].
 //!
-//! Пулы — по классам размера узла (8, 16, …, 256 байт): обобщённых
-//! статических переменных в Rust нет, поэтому очереди с одинаковым размером
-//! узла (`PooledQueue<i32>` и `SyncPooledQueue<u32>`) делят пул; он
-//! потокобезопасен для любых очередей. Узлы больше 256 байт не
-//! поддерживаются (ошибка компиляции): храните `Box<T>`.
+//! Пулы — по классам размера (16, 24, …, 256 байт): обобщённых статических
+//! переменных в Rust нет, поэтому очереди с одинаковым размером узла
+//! (`PooledQueue<i32>` и `SyncPooledQueue<u32>`) делят пул; он потокобезопасен
+//! для любых очередей. Блоки больше 256 байт, с выравниванием больше 16 и
+//! нулевого размера пул передаёт глобальному аллокатору.
 //!
 //! Устройство: у каждого потока на каждый класс — кэш (список свободных
 //! узлов, LIFO, и плита, которую он нарезает) в куче за указателем из
@@ -26,7 +26,7 @@
 //! в ней (в пачке из одного узла второго нет).
 //!
 //! Второй модуль крейта с `unsafe` (после `node`). Инварианты:
-//! - узел, выданный [`alloc`], не выдаётся снова до [`free`];
+//! - узел, выданный `alloc`, не выдаётся снова до `free`;
 //! - плита освобождается только в [`trim`], когда ни одного живого узла нет;
 //! - кэш потока читают другие потоки только через атомарные поля (`stats`) и
 //!   пишут только в `trim`, который требует, чтобы пулом никто не пользовался.
@@ -34,16 +34,14 @@
 #![allow(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-use std::alloc::{Layout, alloc as global_alloc, dealloc, handle_alloc_error};
+use std::alloc::{
+    AllocError, Allocator, Global, Layout, alloc as global_alloc, dealloc, handle_alloc_error,
+};
 use std::cell::{Cell, UnsafeCell};
-use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicU32, Ordering::Acquire, Ordering::Relaxed, Ordering::Release,
 };
-
-use crate::refcount::{RefCount, ThreadSafe, sealed};
-use crate::storage::NodeStorage;
 
 const SLAB_BYTES: usize = 65536;
 const CACHE_MAX: u32 = 4096;
@@ -58,75 +56,57 @@ const SLAB_LAYOUT: Layout = match Layout::from_size_align(SLAB_BYTES, SLAB_ALIGN
     Err(_) => panic!("размер плиты"),
 };
 
-/// Политика узлов: счётчик ссылок `R` ([`Local`](crate::refcount::Local) или
-/// [`Atomic`](crate::refcount::Atomic)), узлы — из пула.
-pub struct Pooled<R: RefCount>(std::convert::Infallible, PhantomData<R>);
+/// Аллокатор узлов из пула: `Queue<T, R, NodePool>`.
+///
+/// Без размера: пул один на процесс (по классам размера), а `NodePool` — лишь
+/// способ к нему обратиться; узел и версия очереди с ним не растут.
+///
+/// Выделение не возвращает [`AllocError`]: при нехватке памяти под новую плиту
+/// вызывается [`handle_alloc_error`], как у `Box::new`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodePool;
 
-impl<R: RefCount> sealed::Sealed for Pooled<R> {}
-// Пул потокобезопасен; поток решает счётчик.
-impl<R: RefCount + ThreadSafe> ThreadSafe for Pooled<R> {}
+// SAFETY: блок класса выдаётся одному владельцу до `deallocate` с той же
+// раскладкой (тот же класс) и остаётся действительным до него: плиты
+// освобождает только `trim`, когда в пуле нет ни одного выданного блока.
+// Блоки не из пула — у `Global`, а `class_of` направляет `deallocate` туда же,
+// куда `allocate`. Все экземпляры `NodePool` — один и тот же пул.
+unsafe impl Allocator for NodePool {
+    #[inline]
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let Some(class) = class_of(layout) else {
+            return Global.allocate(layout);
+        };
+        Ok(NonNull::slice_from_raw_parts(alloc(class), class * 8))
+    }
 
-impl<R: RefCount> RefCount for Pooled<R> {
-    type Counter = R::Counter;
-    type Storage = Pool;
-
     #[inline]
-    fn one() -> R::Counter {
-        R::one()
-    }
-    #[inline]
-    fn increment(counter: &R::Counter) {
-        R::increment(counter);
-    }
-    #[inline]
-    fn decrement(counter: &R::Counter) -> bool {
-        R::decrement(counter)
-    }
-    #[inline]
-    fn is_unique(counter: &R::Counter) -> bool {
-        R::is_unique(counter)
-    }
-    #[inline]
-    fn touch(counter: &R::Counter) {
-        R::touch(counter);
-    }
-    fn get(counter: &R::Counter) -> u32 {
-        R::get(counter)
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        match class_of(layout) {
+            Some(class) => free(class, ptr),
+            // SAFETY: блок выделен `Global` (тот же `class_of` в `allocate`)
+            // с этой раскладкой.
+            None => unsafe { Global.deallocate(ptr, layout) },
+        }
     }
 }
 
-/// Узел — из пула.
-pub enum Pool {}
-
-impl sealed::Sealed for Pool {}
-
-impl NodeStorage for Pool {
-    #[inline]
-    fn place<N>(node: N) -> NonNull<N> {
-        let ptr = alloc::<N>();
-        // SAFETY: свежий узел пула под `N`: размер и выравнивание проверены в
-        // `class_of`, память ничья.
-        unsafe { ptr.as_ptr().write(node) };
-        ptr
+/// Класс блока: его размер в пуле / 8, или `None` — блок не из пула.
+///
+/// Узлы класса нарезаются с шагом в размер класса от начала плиты (оно
+/// выровнено по `SLAB_ALIGN`), поэтому при выравнивании 16 размер класса
+/// кратен 16. Свободный узел хранит два слова — отсюда минимум 16 байт.
+/// Раскладка узла известна при компиляции, и после встраивания класс —
+/// константа. Любой размер, допустимый для `deallocate` блока (между
+/// запрошенным и выданным), попадает в тот же класс.
+#[inline]
+const fn class_of(layout: Layout) -> Option<usize> {
+    let (size, align) = (layout.size(), layout.align());
+    if size == 0 || size > MAX_NODE || align > SLAB_ALIGN {
+        return None;
     }
-
-    #[inline]
-    unsafe fn take<N>(ptr: NonNull<N>) -> N {
-        // SAFETY: узел живой и наш (контракт `take`); после чтения он больше не
-        // используется как `N` и возвращается в пул.
-        let node = unsafe { ptr.as_ptr().read() };
-        free::<N>(ptr);
-        node
-    }
-}
-
-/// Класс узла `N`: размер / 8. Проверка — на этапе компиляции.
-const fn class_of<N>() -> usize {
-    let size = size_of::<N>();
-    assert!(size <= MAX_NODE, "узел больше 256 байт: храните Box<T>");
-    assert!(align_of::<N>() <= SLAB_ALIGN && align_of::<N>() >= 8);
-    assert!(size >= 2 * size_of::<*mut u8>() && size.is_multiple_of(8));
-    size / 8
+    let size = size.next_multiple_of(if align > 8 { 16 } else { 8 });
+    Some(if size < 16 { 2 } else { size / 8 })
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +261,7 @@ fn uncarved(cur: &AtomicPtr<u8>, end: &AtomicPtr<u8>, size: usize) -> usize {
 ///
 /// # Safety
 /// `node` — узел пула размером не меньше `i + 1` слов.
-// Узлы выровнены не меньше чем на 8 (`class_of`), плиты — на 16.
+// Плиты выровнены на 16, размеры классов кратны 8 (`class_of`): узлы — на 8.
 #[allow(clippy::cast_ptr_alignment)]
 unsafe fn word(node: *mut u8, i: usize) -> *mut *mut u8 {
     // SAFETY: см. контракт.
@@ -424,8 +404,7 @@ fn register(class: usize, slot: &Cell<*mut Cache>) -> *const Cache {
 // в `fill` — частый путь.
 
 #[inline]
-fn alloc<N>() -> NonNull<N> {
-    let class = const { class_of::<N>() };
+fn alloc(class: usize) -> NonNull<u8> {
     let node = CACHES.with(|cs| {
         let slot = &cs.0[class];
         let c = slot.get();
@@ -444,7 +423,7 @@ fn alloc<N>() -> NonNull<N> {
         alloc_slow(class, slot)
     });
     // SAFETY: узел пула ненулевой.
-    unsafe { NonNull::new_unchecked(node.cast()) }
+    unsafe { NonNull::new_unchecked(node) }
 }
 
 /// Список пуст (или кэша ещё нет): пачка из общего стека, затем плита
@@ -526,9 +505,8 @@ fn alloc_uncached(class: usize) -> *mut u8 {
 }
 
 #[inline]
-fn free<N>(node: NonNull<N>) {
-    let class = const { class_of::<N>() };
-    let p = node.as_ptr().cast::<u8>();
+fn free(class: usize, node: NonNull<u8>) {
+    let p = node.as_ptr();
     CACHES.with(|cs| {
         let slot = &cs.0[class];
         let c = slot.get();

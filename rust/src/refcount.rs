@@ -4,9 +4,8 @@
 //! Параметр очереди: [`Queue<T>`](crate::Queue) — это `Queue<T, Local>`,
 //! [`SyncQueue<T>`](crate::SyncQueue) — `Queue<T, Atomic>`. Алгоритм и код у них
 //! общие, различаются только операции над счётчиком; однопоточный вариант
-//! компилируется в тот же код, что и без параметра. Политика решает и то, где
-//! живут узлы: у [`Local`] и [`Atomic`] — по `Box` на узел, у `Pooled<R>`
-//! (фича `pool`) — в пуле (`docs/pool.md`).
+//! компилируется в тот же код, что и без параметра. Где живут узлы, решает
+//! не политика, а третий параметр очереди — аллокатор.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
@@ -15,19 +14,10 @@ pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
-#[cfg(feature = "pool")]
-pub use crate::pool::Pool;
-pub use crate::storage::{Heap, NodeStorage};
-
 /// Политика счётчика ссылок узлов; реализуют только [`Local`] и [`Atomic`].
 pub trait RefCount: sealed::Sealed + 'static {
     #[doc(hidden)]
     type Counter;
-
-    /// Где живут узлы: [`Heap`] (по `Box` на узел) или пул
-    /// (`Pooled`, фича `pool`).
-    #[doc(hidden)]
-    type Storage: NodeStorage;
 
     #[doc(hidden)]
     fn one() -> Self::Counter;
@@ -57,7 +47,7 @@ pub trait RefCount: sealed::Sealed + 'static {
 }
 
 /// Потокобезопасная политика: версии — `Send + Sync` при `T: Send + Sync`
-/// ([`Atomic`] и `Pooled<Atomic>` с фичей `pool`).
+/// (и `Send + Sync` аллокаторе).
 pub trait ThreadSafe: RefCount {}
 
 /// Однопоточный счётчик (`Cell<u32>`): версии нельзя передавать между потоками.
@@ -73,7 +63,6 @@ impl ThreadSafe for Atomic {}
 
 impl RefCount for Local {
     type Counter = Cell<u32>;
-    type Storage = Heap;
 
     #[inline]
     fn one() -> Cell<u32> {
@@ -129,7 +118,6 @@ const ATOMIC_MAX_REFS: u32 = u32::MAX / 2;
 //   забирают (значение и хвост) и освобождают.
 impl RefCount for Atomic {
     type Counter = AtomicU32;
-    type Storage = Heap;
 
     #[inline]
     fn one() -> AtomicU32 {

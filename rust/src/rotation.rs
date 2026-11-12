@@ -19,6 +19,7 @@
 //! `drop_in_place` для заведомо пустых значений; API по значению оставлен
 //! только тестам.
 
+use std::alloc::Allocator;
 use std::mem;
 
 use crate::refcount::RefCount;
@@ -32,31 +33,31 @@ pub(crate) type Len = u32;
 /// Счётчик `ok` — сколько элементов старого фронта ещё живы в очереди и не
 /// скопированы в `acc` — хранится снаружи (поле `Queue::ok`); вне ротации он
 /// не используется.
-pub(crate) enum Rotation<T, R: RefCount> {
+pub(crate) enum Rotation<T, R: RefCount, A: Allocator> {
     /// Параллельно разворачиваются `rear` → `acc` и `front` → `rfront`.
     ///
     /// Инвариант: `|rear| == |front| + 1`, оба уменьшаются на каждом шаге.
     Reversing {
         /// Снимок фронта на старте (`old_front` в C).
-        front: Stack<T, R>,
+        front: Stack<T, R, A>,
         /// `reverse(front)`, строится по ходу (`rfacc` в C).
-        rfront: Stack<T, R>,
+        rfront: Stack<T, R, A>,
         /// Снимок тыла на старте (`old_rear` в C).
-        rear: NonEmptyStack<T, R>,
+        rear: NonEmptyStack<T, R, A>,
         /// `reverse(rear)`, будущий хвост нового фронта.
-        acc: Stack<T, R>,
+        acc: Stack<T, R, A>,
     },
     /// Элементы `rfront` по одному переносятся на вершину `acc`.
     ///
     /// Инвариант: `1 <= ok <= |rfront|`. С пустыми `rfront` и `acc` — `Idle`:
     /// ротация не идёт ([`Rotation::idle`], [`Rotation::is_idle`]).
     Appending {
-        rfront: Stack<T, R>,
-        acc: Stack<T, R>,
+        rfront: Stack<T, R, A>,
+        acc: Stack<T, R, A>,
     },
 }
 
-impl<T, R: RefCount> Rotation<T, R> {
+impl<T, R: RefCount, A: Allocator> Rotation<T, R, A> {
     /// Ротация не идёт.
     pub(crate) const fn idle() -> Self {
         Self::Appending {
@@ -71,14 +72,14 @@ impl<T, R: RefCount> Rotation<T, R> {
     }
 }
 
-impl<T, R: RefCount> Default for Rotation<T, R> {
+impl<T, R: RefCount, A: Allocator> Default for Rotation<T, R, A> {
     fn default() -> Self {
         Self::idle()
     }
 }
 
 // Вручную: derive потребовал бы `T: Clone`, хотя клонируются только указатели на узлы.
-impl<T, R: RefCount> Clone for Rotation<T, R> {
+impl<T, R: RefCount, A: Allocator> Clone for Rotation<T, R, A> {
     #[inline]
     fn clone(&self) -> Self {
         match self {
@@ -103,20 +104,20 @@ impl<T, R: RefCount> Clone for Rotation<T, R> {
 
 /// Результат одного перехода (API по значению; используется в тестах).
 #[cfg(test)]
-pub(crate) enum Step<T, R: RefCount> {
+pub(crate) enum Step<T, R: RefCount, A: Allocator> {
     /// Ротация идёт; второе поле — `ok`.
-    Running(Rotation<T, R>, Len),
+    Running(Rotation<T, R, A>, Len),
     /// Ротация завершена; внутри — новый фронт очереди.
-    Done(Stack<T, R>),
+    Done(Stack<T, R, A>),
 }
 
-impl<T: Clone, R: RefCount> Rotation<T, R> {
+impl<T: Clone, R: RefCount, A: Allocator + Clone> Rotation<T, R, A> {
     /// Начать ротацию — аналог `start_rotation`; `ok` становится `front_len`.
     ///
     /// `front` разделяет узлы с живым фронтом очереди; `rear` забирается
     /// у очереди целиком.
     #[inline]
-    pub(crate) fn start(front: Stack<T, R>, rear: Stack<T, R>) -> Self {
+    pub(crate) fn start(front: Stack<T, R, A>, rear: Stack<T, R, A>) -> Self {
         Self::Reversing {
             front,
             rfront: Stack::new(),
@@ -128,7 +129,7 @@ impl<T: Clone, R: RefCount> Rotation<T, R> {
     /// Один шаг ротации на месте — аналог `rotate_step`. По завершении
     /// возвращает новый фронт, а состояние становится `Idle`.
     #[inline]
-    pub(crate) fn step_mut(&mut self, ok: &mut Len) -> Option<Stack<T, R>> {
+    pub(crate) fn step_mut(&mut self, ok: &mut Len, alloc: &A) -> Option<Stack<T, R, A>> {
         match self {
             Self::Reversing {
                 front,
@@ -137,18 +138,18 @@ impl<T: Clone, R: RefCount> Rotation<T, R> {
                 acc,
             } => {
                 let Some(y) = rear.pop_unless_last() else {
-                    return self.finish_reversing(*ok);
+                    return self.finish_reversing(*ok, alloc);
                 };
-                acc.push(y);
+                acc.push(y, alloc);
                 if let Some(x) = front.pop() {
-                    rfront.push(x);
+                    rfront.push(x, alloc);
                 }
                 None
             }
             Self::Appending { rfront, acc } => {
                 // Пустой `rfront` — `Idle`.
                 let x = rfront.pop()?;
-                acc.push(x);
+                acc.push(x, alloc);
                 *ok -= 1;
                 if *ok == 0 {
                     let acc = mem::take(acc);
@@ -164,7 +165,7 @@ impl<T: Clone, R: RefCount> Rotation<T, R> {
     /// Последний шаг `Reversing`: тыл из одного элемента расходуется, фаза
     /// переходит в `Appending` (или сразу завершается).
     #[cold]
-    fn finish_reversing(&mut self, ok: Len) -> Option<Stack<T, R>> {
+    fn finish_reversing(&mut self, ok: Len, alloc: &A) -> Option<Stack<T, R, A>> {
         let Self::Reversing {
             mut front,
             mut rfront,
@@ -174,9 +175,9 @@ impl<T: Clone, R: RefCount> Rotation<T, R> {
         else {
             unreachable!("вызывается только из Reversing");
         };
-        acc.push(rear.into_last());
+        acc.push(rear.into_last(), alloc);
         if let Some(x) = front.pop() {
-            rfront.push(x);
+            rfront.push(x, alloc);
         }
         debug_assert!(front.is_empty(), "front исчерпывается вместе с rear");
         self.enter_appending(ok, rfront, acc)
@@ -189,7 +190,7 @@ impl<T: Clone, R: RefCount> Rotation<T, R> {
     /// является новым фронтом — он возвращается, состояние становится `Idle`.
     /// Вне ротации ничего не делает.
     #[inline]
-    pub(crate) fn invalidate_mut(&mut self, ok: &mut Len) -> Option<Stack<T, R>> {
+    pub(crate) fn invalidate_mut(&mut self, ok: &mut Len) -> Option<Stack<T, R, A>> {
         const MSG: &str = "pop во время ротации: ok > 0, иначе фронт очереди пуст";
         match self {
             Self::Reversing { .. } => {
@@ -218,9 +219,9 @@ impl<T: Clone, R: RefCount> Rotation<T, R> {
     fn enter_appending(
         &mut self,
         ok: Len,
-        rfront: Stack<T, R>,
-        acc: Stack<T, R>,
-    ) -> Option<Stack<T, R>> {
+        rfront: Stack<T, R, A>,
+        acc: Stack<T, R, A>,
+    ) -> Option<Stack<T, R, A>> {
         if ok == 0 {
             *self = Self::idle();
             Some(acc)
@@ -231,15 +232,18 @@ impl<T: Clone, R: RefCount> Rotation<T, R> {
     }
 
     #[cfg(test)]
-    pub(crate) fn step(mut self, mut ok: Len) -> Step<T, R> {
-        match self.step_mut(&mut ok) {
+    pub(crate) fn step(mut self, mut ok: Len) -> Step<T, R, A>
+    where
+        A: Default,
+    {
+        match self.step_mut(&mut ok, &A::default()) {
             Some(front) => Step::Done(front),
             None => Step::Running(self, ok),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn invalidate(mut self, mut ok: Len) -> Step<T, R> {
+    pub(crate) fn invalidate(mut self, mut ok: Len) -> Step<T, R, A> {
         match self.invalidate_mut(&mut ok) {
             Some(front) => Step::Done(front),
             None => Step::Running(self, ok),
@@ -248,7 +252,7 @@ impl<T: Clone, R: RefCount> Rotation<T, R> {
 }
 
 #[cfg(test)]
-impl<T: Clone, R: RefCount> Step<T, R> {
+impl<T: Clone, R: RefCount, A: Allocator + Clone + Default> Step<T, R, A> {
     /// Ещё один шаг; на завершённой ротации ничего не делает.
     pub(crate) fn step(self) -> Self {
         match self {
@@ -262,17 +266,18 @@ impl<T: Clone, R: RefCount> Step<T, R> {
 mod tests {
     use super::*;
     use crate::refcount::Local;
+    use std::alloc::Global;
 
-    type Stack<T> = crate::stack::Stack<T, Local>;
-    type Rotation<T> = super::Rotation<T, Local>;
-    type Step<T> = super::Step<T, Local>;
+    type Stack<T> = crate::stack::Stack<T, Local, Global>;
+    type Rotation<T> = super::Rotation<T, Local, Global>;
+    type Step<T> = super::Step<T, Local, Global>;
 
     /// Стек, у которого `items[0]` на вершине.
     fn stack(items: &[usize]) -> Stack<usize> {
         items
             .iter()
             .rev()
-            .fold(Stack::new(), |s, &x| Stack::cons(x, s))
+            .fold(Stack::new(), |s, &x| Stack::cons(x, s, &Global))
     }
 
     fn to_vec(s: &Stack<usize>) -> Vec<usize> {

@@ -136,6 +136,11 @@ std::thread::scope(|s| {
 В C — `fqueue_sync` с тем же API (`fqueue_sync_push`, …), в Zig —
 `SyncQueue(T)`.
 
+Аллокатор узлов в Rust — третий параметр типа, как у `Vec<T, A>` (Rust
+1.100): `Queue::new_in(alloc)`, `SyncQueue::new_sync_in(alloc)`; по умолчанию
+`Global`. Пул узлов (`docs/pool.md`) — аллокатор `NodePool`
+(`PooledQueue<T>`, `SyncPooledQueue<T>`).
+
 ## Результаты (Apple M5, 4 раскладки кода × 8 раундов)
 
 Такты, млн — медиана быстрого режима; C собран с `-O3 -flto`, Rust — fat LTO,
@@ -221,7 +226,8 @@ Zig — `ReleaseFast`, все под `native`; версии хранятся п�
   jemalloc медленнее в 1.4–1.8 раза там, где все версии живы. Бимодальность
   `mixed_mut 10^7` — свойство системного `malloc`.
 - Пул узлов (#10, `docs/pool.md`) — альтернативные типы рядом с обычными
-  (C `fqueue_pooled`, Rust `PooledQueue` с фичей `pool`, Zig `PooledQueue`):
+  (C `fqueue_pooled`, Rust `PooledQueue` = `Queue<T, Local, NodePool>`,
+  Zig `PooledQueue`):
   быстрее системного `malloc` в 1.1–1.6 раза на персистентных операциях и в
   1.3–2.4 раза на месте, масштабируется по потокам; цена — память на пике
   живого множества до `trim`, `mixed 10^7` медленнее на 20–25%, схема

@@ -4,12 +4,14 @@
 //! удаление — release с итеративным освобождением цепочки.
 
 use crate::node::NodePtr;
+use std::alloc::Allocator;
+
 use crate::refcount::RefCount;
 
 /// Неизменяемый стек. Разные версии разделяют общие хвосты.
-pub(crate) struct Stack<T, R: RefCount>(Option<NodePtr<T, R>>);
+pub(crate) struct Stack<T, R: RefCount, A: Allocator>(Option<NodePtr<T, R, A>>);
 
-impl<T, R: RefCount> Stack<T, R> {
+impl<T, R: RefCount, A: Allocator> Stack<T, R, A> {
     /// Пустой стек.
     pub(crate) const fn new() -> Self {
         Self(None)
@@ -25,8 +27,11 @@ impl<T, R: RefCount> Stack<T, R> {
     /// ссылка просто переезжает в новый узел без изменения счётчика.
     #[must_use]
     #[inline]
-    pub(crate) fn cons(value: T, next: Self) -> Self {
-        Self(Some(NodePtr::new(value, next.0)))
+    pub(crate) fn cons(value: T, next: Self, alloc: &A) -> Self
+    where
+        A: Clone,
+    {
+        Self(Some(NodePtr::new(value, next.0, alloc)))
     }
 
     /// Вершина стека.
@@ -56,9 +61,12 @@ impl<T, R: RefCount> Stack<T, R> {
 
     /// `self = cons(value, self)` — аналог `cons_prepend`.
     #[inline]
-    pub(crate) fn push(&mut self, value: T) {
+    pub(crate) fn push(&mut self, value: T, alloc: &A)
+    where
+        A: Clone,
+    {
         let next = std::mem::take(self);
-        *self = Self::cons(value, next);
+        *self = Self::cons(value, next, alloc);
     }
 
     /// Снимает вершину и возвращает её значение — аналог чтения `->value`
@@ -88,7 +96,7 @@ impl<T, R: RefCount> Stack<T, R> {
 
     /// Итератор по элементам от вершины ко дну.
     #[cfg(test)]
-    pub(crate) fn iter(&self) -> Iter<'_, T, R> {
+    pub(crate) fn iter(&self) -> Iter<'_, T, R, A> {
         Iter(self.0.as_ref())
     }
 }
@@ -96,11 +104,11 @@ impl<T, R: RefCount> Stack<T, R> {
 /// Непустой стек: вершина есть всегда. Указатель на неё ненулевой, и
 /// `Rotation` кодирует свой второй вариант нулём на его месте (niche) — без
 /// отдельного тега.
-pub(crate) struct NonEmptyStack<T, R: RefCount>(NodePtr<T, R>);
+pub(crate) struct NonEmptyStack<T, R: RefCount, A: Allocator>(NodePtr<T, R, A>);
 
-impl<T, R: RefCount> NonEmptyStack<T, R> {
+impl<T, R: RefCount, A: Allocator> NonEmptyStack<T, R, A> {
     #[inline]
-    pub(crate) fn new(stack: Stack<T, R>) -> Option<Self> {
+    pub(crate) fn new(stack: Stack<T, R, A>) -> Option<Self> {
         stack.0.map(Self)
     }
 
@@ -128,12 +136,12 @@ impl<T, R: RefCount> NonEmptyStack<T, R> {
     }
 
     #[cfg(test)]
-    pub(crate) fn iter(&self) -> Iter<'_, T, R> {
+    pub(crate) fn iter(&self) -> Iter<'_, T, R, A> {
         Iter(Some(&self.0))
     }
 }
 
-impl<T, R: RefCount> Clone for NonEmptyStack<T, R> {
+impl<T, R: RefCount, A: Allocator> Clone for NonEmptyStack<T, R, A> {
     #[inline]
     fn clone(&self) -> Self {
         Self(self.0.clone())
@@ -142,24 +150,24 @@ impl<T, R: RefCount> Clone for NonEmptyStack<T, R> {
 
 // Ручные реализации вместо derive: derive потребовал бы `T: Clone` / `T: Default`,
 // хотя клонируется только указатель на узел.
-impl<T, R: RefCount> Clone for Stack<T, R> {
+impl<T, R: RefCount, A: Allocator> Clone for Stack<T, R, A> {
     #[inline]
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<T, R: RefCount> Default for Stack<T, R> {
+impl<T, R: RefCount, A: Allocator> Default for Stack<T, R, A> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[cfg(test)]
-pub(crate) struct Iter<'a, T, R: RefCount>(Option<&'a NodePtr<T, R>>);
+pub(crate) struct Iter<'a, T, R: RefCount, A: Allocator>(Option<&'a NodePtr<T, R, A>>);
 
 #[cfg(test)]
-impl<'a, T, R: RefCount> Iterator for Iter<'a, T, R> {
+impl<'a, T, R: RefCount, A: Allocator> Iterator for Iter<'a, T, R, A> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -173,8 +181,9 @@ impl<'a, T, R: RefCount> Iterator for Iter<'a, T, R> {
 mod tests {
     use super::*;
     use crate::refcount::Local;
+    use std::alloc::Global;
 
-    type Stack<T> = super::Stack<T, Local>;
+    type Stack<T> = super::Stack<T, Local, Global>;
     use std::cell::Cell;
 
     fn from_slice<T: Clone>(items: &[T]) -> Stack<T> {
@@ -182,7 +191,7 @@ mod tests {
         items
             .iter()
             .cloned()
-            .fold(Stack::new(), |s, x| Stack::cons(x, s))
+            .fold(Stack::new(), |s, x| Stack::cons(x, s, &Global))
     }
 
     fn tail<T>(s: &Stack<T>) -> Stack<T> {
@@ -224,8 +233,8 @@ mod tests {
     #[test]
     fn versions_share_tail() {
         let base = from_slice(&[1, 2]);
-        let a = Stack::cons(10, base.clone());
-        let b = Stack::cons(20, base.clone());
+        let a = Stack::cons(10, base.clone(), &Global);
+        let b = Stack::cons(20, base.clone(), &Global);
 
         assert_eq!(to_vec(&a), [10, 2, 1]);
         assert_eq!(to_vec(&b), [20, 2, 1]);
@@ -237,8 +246,8 @@ mod tests {
     #[test]
     fn push_and_pop() {
         let mut s = Stack::new();
-        s.push(1);
-        s.push(2);
+        s.push(1, &Global);
+        s.push(2, &Global);
         assert_eq!(s.pop(), Some(2));
         assert_eq!(s.pop(), Some(1));
         assert_eq!(s.pop(), None);
@@ -268,11 +277,11 @@ mod tests {
         }
 
         let clones = Cell::new(0);
-        let mut s = Stack::cons(Counted(1, &clones), Stack::new());
+        let mut s = Stack::cons(Counted(1, &clones), Stack::new(), &Global);
         assert_eq!(s.pop().map(|c| c.0), Some(1));
         assert_eq!(clones.get(), 0);
 
-        let mut s = Stack::cons(Counted(2, &clones), Stack::new());
+        let mut s = Stack::cons(Counted(2, &clones), Stack::new(), &Global);
         let keep = s.clone();
         assert_eq!(s.pop().map(|c| c.0), Some(2));
         assert_eq!(clones.get(), 1);
@@ -283,7 +292,7 @@ mod tests {
     fn dropping_long_stack_does_not_overflow() {
         let mut s = Stack::new();
         for i in 0..if cfg!(miri) { 10_000 } else { 1_000_000 } {
-            s.push(i);
+            s.push(i, &Global);
         }
         drop(s);
     }
@@ -300,11 +309,11 @@ mod tests {
         let dropped = Cell::new(0);
         let mut shared = Stack::new();
         for _ in 0..3 {
-            shared.push(Tracked(&dropped));
+            shared.push(Tracked(&dropped), &Global);
         }
         let mut a = shared.clone();
-        a.push(Tracked(&dropped));
-        a.push(Tracked(&dropped));
+        a.push(Tracked(&dropped), &Global);
+        a.push(Tracked(&dropped), &Global);
 
         // Освобождаются только два собственных узла `a`, общий хвост жив.
         drop(a);

@@ -1,5 +1,6 @@
-// Тело нагрузки, общее для `fqueue_bench` (`Queue`) и `fqueue_bench_sync`
-// (`SyncQueue`): подключается `include!`, тип очереди `Q` задаёт подключающий.
+// Тело нагрузки, общее для `fqueue_bench` (`Queue`), `fqueue_bench_sync`
+// (`SyncQueue`) и их вариантов с пулом (`fqueue_bench_pool[_sync]`):
+// подключается `include!`, тип очереди `Q` задаёт подключающий.
 
 use std::process::ExitCode;
 use std::time::Instant;

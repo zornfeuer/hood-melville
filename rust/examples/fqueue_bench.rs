@@ -9,10 +9,6 @@
 //! Печатает контрольную сумму извлечённых значений (зависит от порядка).
 //! С `FQ_PHASES=1` печатает в stderr длительность фаз (build/drain/destroy).
 
-// С `--features pool` — то же на очереди с пулом узлов (`docs/pool.md`).
-#[cfg(not(feature = "pool"))]
 type Q = hood_melville::Queue<i32>;
-#[cfg(feature = "pool")]
-type Q = hood_melville::PooledQueue<i32>;
 
 include!("shared/bench.rs");

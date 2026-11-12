@@ -1,11 +1,11 @@
 //! Функциональная очередь Hood–Melville — аналог `fqueue` из `c/include/fqueue_template.h`.
 
+use std::alloc::{Allocator, Global};
 use std::fmt;
 use std::iter::FusedIterator;
 use std::mem;
 
-#[cfg(feature = "pool")]
-use crate::pool::Pooled;
+use crate::pool::NodePool;
 use crate::refcount::{Atomic, Local, RefCount};
 use crate::rotation::{Len, Rotation};
 
@@ -46,7 +46,7 @@ use crate::stack::Stack;
 /// assert_eq!(q2.front(), Some(&2));
 /// assert!(q2.pop().unwrap().pop().is_none());
 /// ```
-pub struct Queue<T, R: RefCount = Local> {
+pub struct Queue<T, R: RefCount = Local, A: Allocator = Global> {
     // u32, а не usize, и `ok` здесь, а не в `Rotation`: структура — 64
     // байта, одна строка кэша (с usize — 88, с `ok` в ротации — 72). Предел —
     // u32::MAX элементов, переполнение проверяется в `push_mut`.
@@ -56,10 +56,13 @@ pub struct Queue<T, R: RefCount = Local> {
     /// Счётчик `ok` текущей ротации (см. `Rotation`); вне ротации — 0.
     ok: Len,
     /// Голова — первый элемент очереди; отсюда `pop`.
-    front: Stack<T, R>,
+    front: Stack<T, R, A>,
     /// Голова — последний добавленный элемент; сюда `push`.
-    rear: Stack<T, R>,
-    rot: Rotation<T, R>,
+    rear: Stack<T, R, A>,
+    rot: Rotation<T, R, A>,
+    /// Аллокатор новых узлов; у каждого узла — свой клон (см. `node`). У
+    /// `Global` и пула размера нет, и структура остаётся 64 байта.
+    alloc: A,
 }
 
 /// Потокобезопасная персистентная очередь: та же [`Queue`] с атомарным
@@ -96,34 +99,31 @@ pub struct Queue<T, R: RefCount = Local> {
 /// let q = hood_melville::Queue::new().push(1);
 /// std::thread::spawn(move || q.len());
 /// ```
-pub type SyncQueue<T> = Queue<T, Atomic>;
+pub type SyncQueue<T, A = Global> = Queue<T, Atomic, A>;
 
-/// [`Queue`] с узлами из пула (`docs/pool.md`): тот же API и семантика,
-/// узлы берутся из пула (плиты по 65 536 байт, кэш у каждого потока) и
-/// возвращаются туда при обнулении счётчика. Пул держит память на пике
-/// живого множества до [`pool::trim`](crate::pool::trim).
-#[cfg(feature = "pool")]
-pub type PooledQueue<T> = Queue<T, Pooled<Local>>;
+/// [`Queue`] с узлами из пула ([`NodePool`], `docs/pool.md`): тот же API и
+/// семантика, узлы берутся из пула (плиты по 65 536 байт, кэш у каждого
+/// потока) и возвращаются туда при обнулении счётчика. Пул держит память на
+/// пике живого множества до [`pool::trim`](crate::pool::trim).
+pub type PooledQueue<T> = Queue<T, Local, NodePool>;
 
 /// [`SyncQueue`] с узлами из пула.
-#[cfg(feature = "pool")]
-pub type SyncPooledQueue<T> = Queue<T, Pooled<Atomic>>;
+pub type SyncPooledQueue<T> = SyncQueue<T, NodePool>;
 
-#[cfg(feature = "pool")]
 impl<T> PooledQueue<T> {
-    /// Пустая очередь с пулом узлов.
+    /// Пустая очередь с пулом узлов; то же, что `Queue::new_in(NodePool)`.
     #[must_use]
     pub const fn new_pooled() -> Self {
-        Self::empty()
+        Self::new_in(NodePool)
     }
 }
 
-#[cfg(feature = "pool")]
 impl<T> SyncPooledQueue<T> {
-    /// Пустая потокобезопасная очередь с пулом узлов.
+    /// Пустая потокобезопасная очередь с пулом узлов; то же, что
+    /// `SyncQueue::new_sync_in(NodePool)`.
     #[must_use]
     pub const fn new_sync_pooled() -> Self {
-        Self::empty()
+        Self::new_sync_in(NodePool)
     }
 }
 
@@ -131,7 +131,7 @@ impl<T> Queue<T> {
     /// Пустая очередь — аналог `fqueue_init`.
     #[must_use]
     pub const fn new() -> Self {
-        Self::empty()
+        Self::new_in(Global)
     }
 }
 
@@ -142,12 +142,28 @@ impl<T> SyncQueue<T> {
     /// `Queue::new()` без аннотации типа перестал бы выводиться.
     #[must_use]
     pub const fn new_sync() -> Self {
-        Self::empty()
+        Self::new_sync_in(Global)
     }
 }
 
-impl<T, R: RefCount> Queue<T, R> {
-    const fn empty() -> Self {
+impl<T, A: Allocator> Queue<T, Local, A> {
+    /// Пустая очередь, узлы которой выделяет `alloc` — как `Vec::new_in`.
+    #[must_use]
+    pub const fn new_in(alloc: A) -> Self {
+        Self::empty(alloc)
+    }
+}
+
+impl<T, A: Allocator> SyncQueue<T, A> {
+    /// Пустая потокобезопасная очередь, узлы которой выделяет `alloc`.
+    #[must_use]
+    pub const fn new_sync_in(alloc: A) -> Self {
+        Self::empty(alloc)
+    }
+}
+
+impl<T, R: RefCount, A: Allocator> Queue<T, R, A> {
+    const fn empty(alloc: A) -> Self {
         Self {
             len: 0,
             front_len: 0,
@@ -156,7 +172,14 @@ impl<T, R: RefCount> Queue<T, R> {
             front: Stack::new(),
             rear: Stack::new(),
             rot: Rotation::idle(),
+            alloc,
         }
+    }
+
+    /// Аллокатор узлов очереди.
+    #[must_use]
+    pub const fn allocator(&self) -> &A {
+        &self.alloc
     }
 
     /// Число элементов — аналог `fqueue_size`.
@@ -180,7 +203,7 @@ impl<T, R: RefCount> Queue<T, R> {
     }
 }
 
-impl<T: Clone, R: RefCount> Queue<T, R> {
+impl<T: Clone, R: RefCount, A: Allocator + Clone> Queue<T, R, A> {
     /// Новая очередь с `value` в конце — аналог `fqueue_push`.
     #[must_use]
     #[inline]
@@ -208,7 +231,7 @@ impl<T: Clone, R: RefCount> Queue<T, R> {
     /// Не заимствует очередь: работает над её O(1)-копией через `pop`, поэтому
     /// каждый шаг — O(1) в худшем случае, а элементы выдаются клонами.
     #[must_use]
-    pub fn iter(&self) -> Iter<T, R> {
+    pub fn iter(&self) -> Iter<T, R, A> {
         Iter(self.clone())
     }
 
@@ -240,7 +263,7 @@ impl<T: Clone, R: RefCount> Queue<T, R> {
     pub fn push_mut(&mut self, value: T) {
         // Проверка до любых изменений: при панике очередь не меняется.
         let len = self.len.checked_add(1).expect("очередь длиннее u32::MAX");
-        self.rear.push(value);
+        self.rear.push(value, &self.alloc);
         self.rear_len += 1;
         self.len = len;
         if self.rot.is_idle() {
@@ -288,7 +311,10 @@ impl<T: Clone, R: RefCount> Queue<T, R> {
     /// встраивал персистентный `pop` — лишняя копия `Option<Queue>`, +9
     /// инструкций на операцию.
     #[inline]
-    fn pop_front_with<V>(&mut self, take: impl FnOnce(&mut Stack<T, R>) -> Option<V>) -> Option<V> {
+    fn pop_front_with<V>(
+        &mut self,
+        take: impl FnOnce(&mut Stack<T, R, A>) -> Option<V>,
+    ) -> Option<V> {
         let taken = take(&mut self.front)?;
         self.front_len -= 1;
         self.len -= 1;
@@ -321,7 +347,7 @@ impl<T: Clone, R: RefCount> Queue<T, R> {
     #[inline]
     fn advance_rotation(&mut self) {
         for _ in 0..ROTATION_STEPS {
-            if let Some(front) = self.rot.step_mut(&mut self.ok) {
+            if let Some(front) = self.rot.step_mut(&mut self.ok, &self.alloc) {
                 self.install_front(front);
             }
         }
@@ -329,7 +355,7 @@ impl<T: Clone, R: RefCount> Queue<T, R> {
 
     /// Установить новый фронт по завершении ротации — аналог `finish_rotation`.
     #[inline]
-    fn install_front(&mut self, front: Stack<T, R>) {
+    fn install_front(&mut self, front: Stack<T, R, A>) {
         self.front = front;
         self.front_len = self.len - self.rear_len;
     }
@@ -337,7 +363,7 @@ impl<T: Clone, R: RefCount> Queue<T, R> {
 
 // Вручную: derive потребовал бы `T: Clone`/`T: Default`.
 // `clone` — аналог `fqueue_clone`: O(1), все узлы общие.
-impl<T, R: RefCount> Clone for Queue<T, R> {
+impl<T, R: RefCount, A: Allocator + Clone> Clone for Queue<T, R, A> {
     #[inline]
     fn clone(&self) -> Self {
         Self {
@@ -348,17 +374,18 @@ impl<T, R: RefCount> Clone for Queue<T, R> {
             front: self.front.clone(),
             rear: self.rear.clone(),
             rot: self.rot.clone(),
+            alloc: self.alloc.clone(),
         }
     }
 }
 
-impl<T, R: RefCount> Default for Queue<T, R> {
+impl<T, R: RefCount, A: Allocator + Default> Default for Queue<T, R, A> {
     fn default() -> Self {
-        Self::empty()
+        Self::empty(A::default())
     }
 }
 
-impl<T: Clone + fmt::Debug, R: RefCount> fmt::Debug for Queue<T, R> {
+impl<T: Clone + fmt::Debug, R: RefCount, A: Allocator + Clone> fmt::Debug for Queue<T, R, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self).finish()
     }
@@ -366,17 +393,17 @@ impl<T: Clone + fmt::Debug, R: RefCount> fmt::Debug for Queue<T, R> {
 
 /// Равенство по содержимому: внутреннее устройство (фаза ротации, раскладка
 /// по стекам) у равных очередей может различаться.
-impl<T: Clone + PartialEq, R: RefCount> PartialEq for Queue<T, R> {
+impl<T: Clone + PartialEq, R: RefCount, A: Allocator + Clone> PartialEq for Queue<T, R, A> {
     fn eq(&self, other: &Self) -> bool {
         self.len == other.len && self.iter().eq(other.iter())
     }
 }
 
-impl<T: Clone + Eq, R: RefCount> Eq for Queue<T, R> {}
+impl<T: Clone + Eq, R: RefCount, A: Allocator + Clone> Eq for Queue<T, R, A> {}
 
-impl<T: Clone, R: RefCount> FromIterator<T> for Queue<T, R> {
+impl<T: Clone, R: RefCount, A: Allocator + Clone + Default> FromIterator<T> for Queue<T, R, A> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut q = Self::empty();
+        let mut q = Self::default();
         q.extend(iter);
         q
     }
@@ -384,7 +411,7 @@ impl<T: Clone, R: RefCount> FromIterator<T> for Queue<T, R> {
 
 /// Добавляет элементы в эту версию; другие версии, разделяющие с ней узлы,
 /// не меняются.
-impl<T: Clone, R: RefCount> Extend<T> for Queue<T, R> {
+impl<T: Clone, R: RefCount, A: Allocator + Clone> Extend<T> for Queue<T, R, A> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         for value in iter {
             self.push_mut(value);
@@ -393,9 +420,9 @@ impl<T: Clone, R: RefCount> Extend<T> for Queue<T, R> {
 }
 
 /// Итератор по элементам очереди — см. [`Queue::iter`].
-pub struct Iter<T, R: RefCount = Local>(Queue<T, R>);
+pub struct Iter<T, R: RefCount = Local, A: Allocator = Global>(Queue<T, R, A>);
 
-impl<T: Clone, R: RefCount> Iterator for Iter<T, R> {
+impl<T: Clone, R: RefCount, A: Allocator + Clone> Iterator for Iter<T, R, A> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
@@ -407,30 +434,30 @@ impl<T: Clone, R: RefCount> Iterator for Iter<T, R> {
     }
 }
 
-impl<T: Clone, R: RefCount> ExactSizeIterator for Iter<T, R> {}
+impl<T: Clone, R: RefCount, A: Allocator + Clone> ExactSizeIterator for Iter<T, R, A> {}
 
-impl<T: Clone, R: RefCount> FusedIterator for Iter<T, R> {}
+impl<T: Clone, R: RefCount, A: Allocator + Clone> FusedIterator for Iter<T, R, A> {}
 
-impl<T, R: RefCount> Clone for Iter<T, R> {
+impl<T, R: RefCount, A: Allocator + Clone> Clone for Iter<T, R, A> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<T: Clone, R: RefCount> IntoIterator for Queue<T, R> {
+impl<T: Clone, R: RefCount, A: Allocator + Clone> IntoIterator for Queue<T, R, A> {
     type Item = T;
-    type IntoIter = Iter<T, R>;
+    type IntoIter = Iter<T, R, A>;
 
-    fn into_iter(self) -> Iter<T, R> {
+    fn into_iter(self) -> Iter<T, R, A> {
         Iter(self)
     }
 }
 
-impl<T: Clone, R: RefCount> IntoIterator for &Queue<T, R> {
+impl<T: Clone, R: RefCount, A: Allocator + Clone> IntoIterator for &Queue<T, R, A> {
     type Item = T;
-    type IntoIter = Iter<T, R>;
+    type IntoIter = Iter<T, R, A>;
 
-    fn into_iter(self) -> Iter<T, R> {
+    fn into_iter(self) -> Iter<T, R, A> {
         self.iter()
     }
 }
@@ -440,7 +467,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    impl<T, R: RefCount> Queue<T, R> {
+    impl<T, R: RefCount, A: Allocator> Queue<T, R, A> {
         /// Структурные инварианты; O(n), только для тестов.
         fn check_invariants(&self) {
             assert_eq!(self.front.iter().count(), self.front_len as usize);

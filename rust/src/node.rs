@@ -10,46 +10,76 @@
 //! Счётчик — по политике `R` (`crate::refcount`): `Cell<u32>` или
 //! `AtomicU32`; в обоих случаях 4 байта, узел для `i32` — 16.
 //!
-//! Модуль крейта с `unsafe` (ещё `storage` и `pool`). Инварианты:
-//! - `NodePtr` всегда указывает на живой `NodeBox`, отданный `Box::leak`
-//!   (с фичей `pool` — `R::Storage::place`: `Box` или пул);
+//! Память узла — у аллокатора `A` (`Global`, пул `NodePool` или любой
+//! другой `Allocator`); его клон лежит в самом узле (см. `NodeBox`).
+//!
+//! Модуль крейта с `unsafe` (ещё `pool`). Инварианты:
+//! - `NodePtr` всегда указывает на живой `NodeBox`, отданный
+//!   `Box::into_non_null_with_allocator` (память — у `A`);
 //! - `refs` равен числу живых `NodePtr` на этот узел (≥ 1, пока узел жив);
-//! - узел освобождается (`Box::from_raw`) ровно один раз — тем, кто уменьшил
-//!   `refs` с 1 до 0 или забрал узел как единственный владелец;
+//! - узел освобождается (`NodeBox::into_box`) ровно один раз — тем, кто
+//!   уменьшил `refs` с 1 до 0 или забрал узел как единственный владелец;
 //! - `value` и `next` после создания узла только читаются; с атомарным
 //!   счётчиком их читают из нескольких потоков (отсюда `T: Sync`), а
 //!   освобождение синхронизировано с этими чтениями порядками памяти счётчика.
 //!
 //! Тесты всего крейта прогоняются под Miri (`just rust-miri`).
 //!
-//! Функции, создающие и забирающие узлы, — в двух вариантах: без фичи `pool`
-//! прежний текст с `Box`, с фичей — через `R::Storage`. Даже мелкая
-//! перестройка MIR (общий макрос, временный кортеж) меняла решения LLVM о
-//! встраивании в нагрузке, а код очереди без пула должен остаться побайтно
-//! прежним (сверка машинного кода — `docs/pool.md`).
+//! Узел создаётся и разбирается через `Box<NodeBox, A>`, а освобождение
+//! цепочки — отдельная функция после проверки счётчика ([`release_chain`]).
+//! Форма выбрана по машинному коду и замерам (`docs/benchmarks.md`, #20):
+//! даже мелкая перестройка MIR (общий макрос, временный кортеж, иной порядок
+//! освобождения) меняла решения LLVM о встраивании в нагрузке.
 
 #![allow(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+use std::alloc::Allocator;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
-#[cfg(feature = "pool")]
-use crate::refcount::NodeStorage;
 use crate::refcount::{RefCount, ThreadSafe};
 
-struct NodeBox<T, R: RefCount> {
+/// Аллокатор узла лежит в самом узле: освобождает узел тот, кто отпустил
+/// последнюю ссылку, а ему больше негде взять аллокатор. Указатель на узел
+/// остаётся одним словом; у аллокатора без размера (`Global`, пул) узел
+/// не растёт.
+///
+/// `alloc` — в `ManuallyDrop`: при освобождении он переезжает в `Box`, который
+/// возвращает память ([`NodeBox::into_box`]), и удаляется вместе с ним.
+struct NodeBox<T, R: RefCount, A: Allocator> {
     refs: R::Counter,
     value: T,
-    next: Option<NodePtr<T, R>>,
+    next: Option<NodePtr<T, R, A>>,
+    alloc: ManuallyDrop<A>,
+}
+
+impl<T, R: RefCount, A: Allocator> NodeBox<T, R, A> {
+    /// Вернуть владение узлом `Box` с аллокатором узла.
+    ///
+    /// Разбирать узел — через этот `Box` (`let NodeBox { .. } = *node`), как
+    /// до параметра аллокатора: память возвращается в конце области
+    /// видимости, после значения, и машинный код с `Global` тот же.
+    ///
+    /// # Safety
+    /// `ptr` получен из [`NodePtr::new`], узел забирается ровно один раз.
+    #[inline]
+    unsafe fn into_box(ptr: NonNull<Self>) -> Box<Self, A> {
+        // SAFETY: узел живой (контракт); `alloc` забирается из него один раз
+        // и дальше в узле не используется (`ManuallyDrop`).
+        let alloc = unsafe { ManuallyDrop::into_inner((&raw const (*ptr.as_ptr()).alloc).read()) };
+        // SAFETY: память выделена `new` клоном `alloc` (клоны аллокатора
+        // взаимозаменяемы) под раскладку `Self`.
+        unsafe { Box::from_non_null_in(ptr, alloc) }
+    }
 }
 
 /// Владеющая ссылка на узел: клонирование — retain, удаление — release.
-pub(crate) struct NodePtr<T, R: RefCount> {
-    ptr: NonNull<NodeBox<T, R>>,
+pub(crate) struct NodePtr<T, R: RefCount, A: Allocator> {
+    ptr: NonNull<NodeBox<T, R, A>>,
     /// Для drop check: `NodePtr` владеет `NodeBox`, а значит и `T`.
-    _owns: PhantomData<NodeBox<T, R>>,
+    _owns: PhantomData<NodeBox<T, R, A>>,
 }
 
 // SAFETY: как у `Arc<T>`: ссылку можно передать другому потоку и разделять
@@ -58,42 +88,37 @@ pub(crate) struct NodePtr<T, R: RefCount> {
 // Счётчик атомарный, а освобождение синхронизировано с чтениями
 // (`Release`/`Acquire`, см. `refcount`). С `Local` (`Cell`) — ни то ни другое:
 // `NonNull` не `Send`/`Sync`, а `Rotation`/`Queue` наследуют это.
-// Хранилище узлов (`Box`, пул) потокобезопасно в обоих случаях.
-unsafe impl<T: Send + Sync, R: ThreadSafe> Send for NodePtr<T, R> {}
+// Аллокатор — так же: его копия в узле переходит к потоку, который узел
+// освобождает, а клонируют её при создании соседних узлов из разных потоков.
+unsafe impl<T: Send + Sync, R: ThreadSafe, A: Allocator + Send + Sync> Send for NodePtr<T, R, A> {}
 // SAFETY: см. выше.
-unsafe impl<T: Send + Sync, R: ThreadSafe> Sync for NodePtr<T, R> {}
+unsafe impl<T: Send + Sync, R: ThreadSafe, A: Allocator + Send + Sync> Sync for NodePtr<T, R, A> {}
 
-impl<T, R: RefCount> NodePtr<T, R> {
-    /// Новый узел со счётчиком 1 — аналог `cons`.
+impl<T, R: RefCount, A: Allocator> NodePtr<T, R, A> {
+    /// Новый узел со счётчиком 1 — аналог `cons`. Память — у `alloc`, в узел
+    /// кладётся его клон.
     #[inline]
-    #[cfg(not(feature = "pool"))]
-    pub(crate) fn new(value: T, next: Option<Self>) -> Self {
-        let node = Box::new(NodeBox {
-            refs: R::one(),
-            value,
-            next,
-        });
-        Self {
-            ptr: NonNull::from(Box::leak(node)),
-            _owns: PhantomData,
-        }
-    }
-
-    #[cfg(feature = "pool")]
-    #[inline]
-    pub(crate) fn new(value: T, next: Option<Self>) -> Self {
-        Self {
-            ptr: R::Storage::place(NodeBox {
+    pub(crate) fn new(value: T, next: Option<Self>, alloc: &A) -> Self
+    where
+        A: Clone,
+    {
+        let node = Box::new_in(
+            NodeBox {
                 refs: R::one(),
                 value,
                 next,
-            }),
+                alloc: ManuallyDrop::new(alloc.clone()),
+            },
+            alloc,
+        );
+        Self {
+            ptr: Box::into_non_null_with_allocator(node).0,
             _owns: PhantomData,
         }
     }
 
     #[inline]
-    fn inner(&self) -> &NodeBox<T, R> {
+    fn inner(&self) -> &NodeBox<T, R, A> {
         // SAFETY: пока жив `self`, он держит одну из `refs` ссылок, и узел не
         // освобождён; изменяемых ссылок на `NodeBox` не бывает (счётчик меняется
         // через `Cell`/атомарные операции).
@@ -113,31 +138,16 @@ impl<T, R: RefCount> NodePtr<T, R> {
     /// Разобрать узел на значение и хвост, если `self` — единственный
     /// владелец; иначе вернуть ссылку обратно.
     #[inline]
-    #[cfg(not(feature = "pool"))]
     pub(crate) fn into_parts(self) -> Result<(T, Option<Self>), Self> {
         if !R::is_unique(&self.inner().refs) {
             return Err(self);
         }
         let this = ManuallyDrop::new(self);
         // SAFETY: `refs == 1` — других `NodePtr` на узел нет, а наш ни
-        // `Drop`, ни повторно уже не используется (`ManuallyDrop`). Указатель
-        // получен из `Box::leak`, так что владение возвращается `Box` ровно раз.
-        let node = unsafe { Box::from_raw(this.ptr.as_ptr()) };
+        // `Drop`, ни повторно уже не используется (`ManuallyDrop`); узел
+        // забирается ровно раз.
+        let node = unsafe { NodeBox::into_box(this.ptr) };
         let NodeBox { value, next, .. } = *node;
-        Ok((value, next))
-    }
-
-    #[cfg(feature = "pool")]
-    #[inline]
-    pub(crate) fn into_parts(self) -> Result<(T, Option<Self>), Self> {
-        if !R::is_unique(&self.inner().refs) {
-            return Err(self);
-        }
-        let this = ManuallyDrop::new(self);
-        // SAFETY: `refs == 1` — других `NodePtr` на узел нет, а наш ни
-        // `Drop`, ни повторно уже не используется (`ManuallyDrop`). Указатель
-        // получен из `R::Storage::place`, узел забирается ровно раз.
-        let NodeBox { value, next, .. } = unsafe { R::Storage::take(this.ptr) };
         Ok((value, next))
     }
 
@@ -150,7 +160,6 @@ impl<T, R: RefCount> NodePtr<T, R> {
     /// хвост переходит к `self` без изменения счётчика; разделяемый узел
     /// остаётся другим версиям, значение клонируется.
     #[inline]
-    #[cfg(not(feature = "pool"))]
     pub(crate) fn advance_unless_last(&mut self) -> Option<T>
     where
         T: Clone,
@@ -162,39 +171,12 @@ impl<T, R: RefCount> NodePtr<T, R> {
             *self = next.clone();
             return Some(value);
         }
-        // SAFETY: `refs == 1` — других `NodePtr` на узел нет; указатель из
-        // `Box::leak`, владение возвращается `Box` ровно раз. До записи
-        // `self.ptr` ниже ничто не паникует и не читает `self`: висячий
-        // указатель не виден ни `Drop`, ни вызывающему.
-        let node = unsafe { Box::from_raw(self.ptr.as_ptr()) };
+        // SAFETY: `refs == 1` — других `NodePtr` на узел нет; узел
+        // забирается ровно раз. До записи `self.ptr` ниже ничто не паникует
+        // и не читает `self`: висячий указатель не виден ни `Drop`, ни
+        // вызывающему.
+        let node = unsafe { NodeBox::into_box(self.ptr) };
         let NodeBox { value, next, .. } = *node;
-        // `next` проверен выше и с тех пор не менялся.
-        let Some(next) = next else {
-            std::process::abort()
-        };
-        self.ptr = ManuallyDrop::new(next).ptr;
-        self.touch();
-        Some(value)
-    }
-
-    #[cfg(feature = "pool")]
-    #[inline]
-    pub(crate) fn advance_unless_last(&mut self) -> Option<T>
-    where
-        T: Clone,
-    {
-        let next = self.inner().next.as_ref()?;
-        if !R::is_unique(&self.inner().refs) {
-            // Паника `clone` оставляет `self` нетронутым.
-            let value = self.value().clone();
-            *self = next.clone();
-            return Some(value);
-        }
-        // SAFETY: `refs == 1` — других `NodePtr` на узел нет; указатель из
-        // `R::Storage::place`, узел забирается ровно раз. До записи
-        // `self.ptr` ниже ничто не паникует и не читает `self`: висячий
-        // указатель не виден ни `Drop`, ни вызывающему.
-        let NodeBox { value, next, .. } = unsafe { R::Storage::take(self.ptr) };
         // `next` проверен выше и с тех пор не менялся.
         let Some(next) = next else {
             std::process::abort()
@@ -223,7 +205,7 @@ impl<T, R: RefCount> NodePtr<T, R> {
     }
 }
 
-impl<T, R: RefCount> Clone for NodePtr<T, R> {
+impl<T, R: RefCount, A: Allocator> Clone for NodePtr<T, R, A> {
     #[inline]
     fn clone(&self) -> Self {
         R::increment(&self.inner().refs);
@@ -239,38 +221,14 @@ impl<T, R: RefCount> Clone for NodePtr<T, R> {
 /// Рекурсивный drop (`NodeBox` → `next` → `NodeBox` → ...) переполнил бы стек
 /// вызовов на длинных списках, поэтому хвост умершего узла освобождается в
 /// том же цикле, пока узлы умирают; на первом живом цикл останавливается.
-impl<T, R: RefCount> Drop for NodePtr<T, R> {
-    #[inline]
-    #[cfg(not(feature = "pool"))]
-    fn drop(&mut self) {
-        let mut ptr = self.ptr;
-        loop {
-            // SAFETY: мы держим одну ссылку на узел `ptr` (сначала — `self`,
-            // далее — `next`, забранный из освобождённого узла), он жив.
-            let refs = unsafe { &ptr.as_ref().refs };
-            if !R::decrement(refs) {
-                return;
-            }
-            // SAFETY: мы были последним владельцем (`refs` дошёл до 0), ссылок
-            // на узел больше нет, `refs` выше больше не используется; с
-            // атомарным счётчиком `decrement` синхронизировал нас со всеми
-            // обращениями прежних владельцев.
-            let node = unsafe { Box::from_raw(ptr.as_ptr()) };
-            let NodeBox { value, next, .. } = *node;
-            drop(value);
-            let Some(next) = next else { return };
-            // Ссылка `next` переходит к циклу: её release — следующая итерация.
-            ptr = ManuallyDrop::new(next).ptr;
-        }
-    }
-
-    /// С пулом — короткая проверка счётчика, а освобождение цепочки —
-    /// отдельной функцией ([`release_chain`]): в одной функции с циклом LLVM
-    /// выносил в её начало адрес кэша потока (вызов `_tlv_get_addr`) и
-    /// сохранение регистров, и их платило каждое отпускание ссылки, а не
-    /// только освобождение узла (в C это `release`, где цикл начинается с
-    /// проверки).
-    #[cfg(feature = "pool")]
+///
+/// Здесь — только короткая проверка счётчика, а цикл — отдельной функцией
+/// ([`release_chain`]), как `release` в C. В одной функции с циклом LLVM
+/// выносил в её начало подготовку пути освобождения — с пулом это адрес кэша
+/// потока (вызов `_tlv_get_addr`) и сохранение регистров, — и их платило
+/// каждое отпускание ссылки, а не только освобождение узла: с пулом на 3–12%
+/// медленнее; с `Global` обе формы равны.
+impl<T, R: RefCount, A: Allocator> Drop for NodePtr<T, R, A> {
     #[inline]
     fn drop(&mut self) {
         // SAFETY: `self` держит одну ссылку на узел `ptr`, он жив.
@@ -286,14 +244,14 @@ impl<T, R: RefCount> Drop for NodePtr<T, R> {
 ///
 /// # Safety
 /// Счётчик `ptr` дошёл до 0 (с атомарным — `decrement` синхронизировал нас с
-/// прежними владельцами); узел размещён `R::Storage::place`.
-#[cfg(feature = "pool")]
+/// прежними владельцами).
 #[inline(never)]
-unsafe fn release_chain<T, R: RefCount>(mut ptr: NonNull<NodeBox<T, R>>) {
+unsafe fn release_chain<T, R: RefCount, A: Allocator>(mut ptr: NonNull<NodeBox<T, R, A>>) {
     loop {
         // SAFETY: см. контракт; далее — `next`, забранный из освобождённого
         // узла, чей счётчик тоже дошёл до 0.
-        let NodeBox { value, next, .. } = unsafe { R::Storage::take(ptr) };
+        let node = unsafe { NodeBox::into_box(ptr) };
+        let NodeBox { value, next, .. } = *node;
         drop(value);
         let Some(next) = next else { return };
         // Ссылка `next` переходит к циклу.
@@ -309,27 +267,28 @@ unsafe fn release_chain<T, R: RefCount>(mut ptr: NonNull<NodeBox<T, R>>) {
 mod tests {
     use super::*;
     use crate::refcount::{Atomic, Local};
+    use std::alloc::Global;
     use std::rc::Rc;
     use std::sync::Arc;
     use std::thread;
 
-    type NodePtr<T> = super::NodePtr<T, Local>;
+    type NodePtr<T> = super::NodePtr<T, Local, Global>;
 
-    fn refs<T, R: RefCount>(p: &super::NodePtr<T, R>) -> u32 {
+    fn refs<T, R: RefCount>(p: &super::NodePtr<T, R, Global>) -> u32 {
         R::get(&p.inner().refs)
     }
 
     #[test]
     fn node_layout_matches_c() {
         // C: `struct node { int value; int refcount; struct node *next; }`.
-        assert_eq!(size_of::<NodeBox<i32, Local>>(), 16);
-        assert_eq!(size_of::<NodeBox<i32, Atomic>>(), 16);
+        assert_eq!(size_of::<NodeBox<i32, Local, Global>>(), 16);
+        assert_eq!(size_of::<NodeBox<i32, Atomic, Global>>(), 16);
         assert_eq!(size_of::<Option<NodePtr<i32>>>(), 8);
     }
 
     #[test]
     fn clone_and_drop_track_refs() {
-        let a = NodePtr::new(1, None);
+        let a = NodePtr::new(1, None, &Global);
         let b = a.clone();
         assert_eq!(refs(&a), 2);
         assert!(NodePtr::ptr_eq(&a, &b));
@@ -339,8 +298,8 @@ mod tests {
 
     #[test]
     fn into_parts_only_for_unique_owner() {
-        let tail = NodePtr::new(1, None);
-        let a = NodePtr::new(2, Some(tail.clone()));
+        let tail = NodePtr::new(1, None, &Global);
+        let a = NodePtr::new(2, Some(tail.clone()), &Global);
         let keep = a.clone();
 
         let Err(a) = a.into_parts() else {
@@ -355,10 +314,10 @@ mod tests {
     #[test]
     fn drop_releases_values_and_stops_at_shared_node() {
         let tracker = Rc::new(());
-        let shared = NodePtr::new(Rc::clone(&tracker), None);
+        let shared = NodePtr::new(Rc::clone(&tracker), None, &Global);
         let mut head = Some(shared.clone());
         for _ in 0..3 {
-            head = Some(NodePtr::new(Rc::clone(&tracker), head));
+            head = Some(NodePtr::new(Rc::clone(&tracker), head, &Global));
         }
         assert_eq!(Rc::strong_count(&tracker), 5);
 
@@ -375,9 +334,9 @@ mod tests {
     /// отсутствие гонок данных.
     #[test]
     fn atomic_refs_across_threads() {
-        type P = super::NodePtr<Arc<u32>, Atomic>;
+        type P = super::NodePtr<Arc<u32>, Atomic, Global>;
         let tracker = Arc::new(7);
-        let shared: P = super::NodePtr::new(Arc::clone(&tracker), None);
+        let shared: P = super::NodePtr::new(Arc::clone(&tracker), None, &Global);
         let (threads, rounds) = if cfg!(miri) { (3, 20) } else { (8, 2000) };
         thread::scope(|s| {
             for _ in 0..threads {
@@ -385,7 +344,7 @@ mod tests {
                     for _ in 0..rounds {
                         let mut head = Some(shared.clone());
                         for _ in 0..3 {
-                            head = Some(super::NodePtr::new(Arc::clone(&tracker), head));
+                            head = Some(super::NodePtr::new(Arc::clone(&tracker), head, &Global));
                         }
                         let mut node = head.unwrap();
                         while let Some(value) = node.advance_unless_last() {

@@ -2,17 +2,13 @@
 name = "hood-melville"
 version = "0.1.0"
 edition = "2024"
+# Стабильный allocator API (`Queue<T, R, A: Allocator>`).
+rust-version = "1.100"
 description = "Persistent real-time queue of Hood and Melville: worst-case O(1) push, pop and front"
 license = "MIT"
 repository = "https://github.com/zornfeuer/hood-melville"
 keywords = ["queue", "persistent", "functional", "immutable", "data-structures"]
 categories = ["data-structures"]
-
-[features]
-# Очередь с пулом узлов (PooledQueue, SyncPooledQueue, модуль pool;
-# docs/pool.md). Без фичи код пула не компилируется, и код очереди побайтно
-# тот же, что без неё.
-pool = []
 
 [dependencies]
 

@@ -50,12 +50,10 @@ c-install-check:
 
 rust-test:
     cd rust && cargo test
-    cd rust && cargo test --features pool
     cd rust && cargo test --release
-    cd rust && cargo test --release --features pool
 
-# Все цели крейта (библиотека, тесты, примеры-нагрузки, criterion) без пула и
-# с ним, и микротест bench/snapshot/rd.rs (собирается как пример, как в
+# Все цели крейта (библиотека, тесты, примеры-нагрузки, criterion) и
+# микротест bench/snapshot/rd.rs (собирается как пример, как в
 # bench/snapshot/run.sh).
 rust-lint:
     #!/usr/bin/env bash
@@ -64,7 +62,6 @@ rust-lint:
     cargo fmt --check
     rustfmt --check --edition 2024 ../bench/snapshot/rd.rs
     cargo clippy --all-targets -- -W clippy::pedantic -D warnings
-    cargo clippy --all-targets --features pool -- -W clippy::pedantic -D warnings
     cp ../bench/snapshot/rd.rs examples/zz_snapshot_rd.rs
     trap 'rm -f examples/zz_snapshot_rd.rs' EXIT
     cargo clippy --example zz_snapshot_rd -- -W clippy::pedantic -D warnings
@@ -74,8 +71,8 @@ rust-lint:
 rust-miri:
     cd rust && cargo +nightly miri test --lib --test scenarios --test model --test branching --test sync
     cd rust && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test --lib
-    cd rust && MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test --features pool --test pool
-    cd rust && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test --features pool --test pool
+    cd rust && MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test --test pool --test allocator
+    cd rust && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test --test pool --test allocator
 
 # --- Zig 0.16 ----------------------------------------------------------------
 
@@ -189,11 +186,10 @@ bench-quick-build: zig-build
     cc -O3 -march=native -flto -DNDEBUG -Ic/include c/bench/fqueue_bench.c c/src/fqueue.c -o build/quick/C
     cc -O3 -march=native -flto -DNDEBUG -DFQUEUE_BENCH_POOL -Ic/include c/bench/fqueue_bench.c c/src/fqueue.c \
         -o build/quick/C-pool
-    (cd rust && RUSTFLAGS="-C target-cpu=native" cargo build -q --profile max --example fqueue_bench --target-dir target/quick)
-    (cd rust && RUSTFLAGS="-C target-cpu=native" cargo build -q --profile max --features pool --example fqueue_bench \
-        --target-dir target/quick-pool)
+    (cd rust && RUSTFLAGS="-C target-cpu=native" cargo build -q --profile max --example fqueue_bench \
+        --example fqueue_bench_pool --target-dir target/quick)
     cp rust/target/quick/max/examples/fqueue_bench build/quick/Rust
-    cp rust/target/quick-pool/max/examples/fqueue_bench build/quick/Rust-pool
+    cp rust/target/quick/max/examples/fqueue_bench_pool build/quick/Rust-pool
     cp zig/zig-out/bin/fqueue_bench build/quick/Zig
     cp zig/zig-out/bin/fqueue_bench_pool build/quick/Zig-pool
 
@@ -297,10 +293,10 @@ bench-layouts-pool label="cur":
             -falign-functions=$a -falign-loops=$a c/bench/fqueue_bench.c c/src/fqueue.c -o "$dir/C-pool-sync-al$a"
         log2=0; x=$a; while (( x > 1 )); do x=$(( x / 2 )); log2=$(( log2 + 1 )); done
         (cd rust && RUSTFLAGS="-C target-cpu=native -C llvm-args=-align-all-functions=$log2 -C llvm-args=-align-loops=$a" \
-            cargo build -q --profile max --features pool --example fqueue_bench --example fqueue_bench_sync \
-            --target-dir target/layout-pool-al$a)
-        cp rust/target/layout-pool-al$a/max/examples/fqueue_bench "$dir/Rust-pool-al$a"
-        cp rust/target/layout-pool-al$a/max/examples/fqueue_bench_sync "$dir/Rust-pool-sync-al$a"
+            cargo build -q --profile max --example fqueue_bench_pool --example fqueue_bench_pool_sync \
+            --target-dir target/layout-al$a)
+        cp rust/target/layout-al$a/max/examples/fqueue_bench_pool "$dir/Rust-pool-al$a"
+        cp rust/target/layout-al$a/max/examples/fqueue_bench_pool_sync "$dir/Rust-pool-sync-al$a"
     done
     echo "раскладки: $dir"
 
@@ -354,15 +350,14 @@ bench-par-build: zig-build
     fi
     cc -O3 -march=native -flto -DNDEBUG -Ic/include ${omp[@]+"${omp[@]}"} \
         c/bench/fqueue_par.c c/src/fqueue.c -o build/par/C
-    (cd rust && RUSTFLAGS="-C target-cpu=native" cargo build -q --profile max --example fqueue_par)
+    (cd rust && RUSTFLAGS="-C target-cpu=native" cargo build -q --profile max --example fqueue_par \
+        --example fqueue_par_pool)
     cp rust/target/max/examples/fqueue_par build/par/Rust
     cp zig/zig-out/bin/fqueue_par build/par/Zig
     # С пулом узлов (docs/pool.md): build/par/{C,Rust,Zig}-pool.
     cc -O3 -march=native -flto -DNDEBUG -DFQUEUE_BENCH_POOL -Ic/include ${omp[@]+"${omp[@]}"} \
         c/bench/fqueue_par.c c/src/fqueue.c -o build/par/C-pool
-    (cd rust && RUSTFLAGS="-C target-cpu=native" cargo build -q --profile max --features pool \
-        --example fqueue_par --target-dir target/pool)
-    cp rust/target/pool/max/examples/fqueue_par build/par/Rust-pool
+    cp rust/target/max/examples/fqueue_par_pool build/par/Rust-pool
     cp zig/zig-out/bin/fqueue_par_pool build/par/Zig-pool
 
 # Масштабирование по числу потоков и доле операций над общими версиями.
