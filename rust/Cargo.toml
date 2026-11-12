@@ -8,6 +8,12 @@ repository = "https://github.com/zornfeuer/hood-melville"
 keywords = ["queue", "persistent", "functional", "immutable", "data-structures"]
 categories = ["data-structures"]
 
+[features]
+# Очередь с пулом узлов (PooledQueue, SyncPooledQueue, модуль pool;
+# docs/pool.md). Без фичи код пула не компилируется, и код очереди побайтно
+# тот же, что без неё.
+pool = []
+
 [dependencies]
 
 [dev-dependencies]

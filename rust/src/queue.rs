@@ -4,6 +4,8 @@ use std::fmt;
 use std::iter::FusedIterator;
 use std::mem;
 
+#[cfg(feature = "pool")]
+use crate::pool::Pooled;
 use crate::refcount::{Atomic, Local, RefCount};
 use crate::rotation::{Len, Rotation};
 
@@ -95,6 +97,35 @@ pub struct Queue<T, R: RefCount = Local> {
 /// std::thread::spawn(move || q.len());
 /// ```
 pub type SyncQueue<T> = Queue<T, Atomic>;
+
+/// [`Queue`] с узлами из пула (`docs/pool.md`): тот же API и семантика,
+/// узлы берутся из пула (плиты по 65 536 байт, кэш у каждого потока) и
+/// возвращаются туда при обнулении счётчика. Пул держит память на пике
+/// живого множества до [`pool::trim`](crate::pool::trim).
+#[cfg(feature = "pool")]
+pub type PooledQueue<T> = Queue<T, Pooled<Local>>;
+
+/// [`SyncQueue`] с узлами из пула.
+#[cfg(feature = "pool")]
+pub type SyncPooledQueue<T> = Queue<T, Pooled<Atomic>>;
+
+#[cfg(feature = "pool")]
+impl<T> PooledQueue<T> {
+    /// Пустая очередь с пулом узлов.
+    #[must_use]
+    pub const fn new_pooled() -> Self {
+        Self::empty()
+    }
+}
+
+#[cfg(feature = "pool")]
+impl<T> SyncPooledQueue<T> {
+    /// Пустая потокобезопасная очередь с пулом узлов.
+    #[must_use]
+    pub const fn new_sync_pooled() -> Self {
+        Self::empty()
+    }
+}
 
 impl<T> Queue<T> {
     /// Пустая очередь — аналог `fqueue_init`.

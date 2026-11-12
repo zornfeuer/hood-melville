@@ -4,9 +4,14 @@
 #![deny(unsafe_code)]
 
 mod node;
+#[cfg(feature = "pool")]
+pub mod pool;
 mod queue;
 pub mod refcount;
 mod rotation;
 mod stack;
+mod storage;
 
 pub use queue::{Iter, Queue, SyncQueue};
+#[cfg(feature = "pool")]
+pub use queue::{PooledQueue, SyncPooledQueue};

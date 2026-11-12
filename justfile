@@ -48,16 +48,20 @@ c-install-check:
 
 rust-test:
     cd rust && cargo test
+    cd rust && cargo test --features pool
 
 rust-lint:
     cd rust && cargo fmt --check
     cd rust && cargo clippy --all-targets -- -W clippy::pedantic -D warnings
+    cd rust && cargo clippy --all-targets --features pool -- -W clippy::pedantic -D warnings
 
-# Тесты под Miri: проверка unsafe в rust/src/node.rs на UB и утечки
+# Тесты под Miri: проверка unsafe в rust/src/node.rs (и pool.rs) на UB и утечки
 # (Stacked Borrows для всех тестов, Tree Borrows — для юнит-тестов).
 rust-miri:
     cd rust && cargo +nightly miri test --lib --test scenarios --test model --test branching --test sync
     cd rust && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test --lib
+    cd rust && MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test --features pool --test pool
+    cd rust && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test --features pool --test pool
 
 # --- Zig 0.16 ----------------------------------------------------------------
 
