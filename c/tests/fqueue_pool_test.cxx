@@ -74,7 +74,7 @@ TEMPLATE_TEST_CASE("the pool counts live nodes and trims when none is left",
   REQUIRE(P::trim() == 0); // q is alive
 
   TestType c;
-  REQUIRE(A::clone(&c, &q) == FQUEUE_OK);
+  A::clone(&c, &q);
   REQUIRE(P::stats().live == s.live); // clone shares every node
   A::destroy(&q);
   REQUIRE(P::stats().live == s.live);
@@ -174,7 +174,7 @@ TEST_CASE("nodes freed by another thread stay in that thread's cache",
   fqueue_pooled_sync base = filled<fqueue_pooled_sync>(N);
   std::vector<fqueue_pooled_sync> clones(READERS);
   for (auto &c : clones)
-    REQUIRE(A::clone(&c, &base) == FQUEUE_OK);
+    A::clone(&c, &base);
   A::destroy(&base);
   std::vector<std::thread> threads;
   for (auto &c : clones)

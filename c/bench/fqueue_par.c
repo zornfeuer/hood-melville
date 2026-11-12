@@ -76,7 +76,7 @@ static void build_shared(void) {
   fqueue_sync q, next;
   fqueue_sync_init(&q);
   for (int j = 0; j < SHARED * 24; ++j) {
-    if (j % 24 == 0) check(fqueue_sync_clone(&shared[j / 24], &q));
+    if (j % 24 == 0) fqueue_sync_clone(&shared[j / 24], &q);
     if (j % 3 == 2)
       check(fqueue_sync_pop(&next, &q));
     else
@@ -179,10 +179,10 @@ static void *run_reader(void *arg) {
     // Итератор обходит копию снимка; копия снимается под мьютексом.
     fqueue_sync_iter it;
     pthread_mutex_lock(&slot_mutex);
-    fqueue_status s = fqueue_sync_iter_init(&it, &slot);
+    fqueue_sync_iter_init(&it, &slot);
     pthread_mutex_unlock(&slot_mutex);
-    check(s);
     int v;
+    fqueue_status s;
     while ((s = fqueue_sync_iter_next(&it, &v)) == FQUEUE_OK) {
       sum = mix(sum, v);
       elements++;
@@ -201,7 +201,7 @@ static uint64_t run_snapshot(int readers, uint64_t *elapsed, uint64_t *snapshots
   fqueue_sync_init(&q);
   for (int i = 0; i < SNAP_SIZE; ++i)
     check(fqueue_sync_push_in_place(&q, i));
-  check(fqueue_sync_clone(&slot, &q));
+  fqueue_sync_clone(&slot, &q);
   pthread_t *threads = malloc((size_t)readers * sizeof *threads);
   reader *results = malloc((size_t)readers * sizeof *results);
   if (readers && (!threads || !results)) abort();
@@ -216,7 +216,7 @@ static uint64_t run_snapshot(int readers, uint64_t *elapsed, uint64_t *snapshots
     if ((k + 1) % PERIOD == 0) {
       // Копия снимается и прежний снимок освобождается вне мьютекса.
       fqueue_sync snapshot, old;
-      check(fqueue_sync_clone(&snapshot, &q));
+      fqueue_sync_clone(&snapshot, &q);
       pthread_mutex_lock(&slot_mutex);
       old = slot;
       slot = snapshot;

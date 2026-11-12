@@ -1,6 +1,7 @@
 // Error paths: fqueue.c built with a failing test allocator and small limits
 // (TEST_LEN_LIMIT, TEST_REFS_LIMIT; see CMakeLists.txt). Every failure must
-// leave `q` unchanged and leak nothing.
+// leave `q` unchanged and leak nothing; only saturated reference counts leak
+// their nodes, by design.
 
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <deque>
+#include <set>
 #include <vector>
 
 #include "fqueue.h"
@@ -22,6 +24,9 @@ static long live = 0;     // allocated and not yet freed
 static long allocs = 0;   // successful allocations, ever
 static long fail_in = -1; // fail the allocation after this many; -1: never
 static bool injected = false;
+// Blocks allocated while tracking and not yet freed: the nodes that saturated
+// counts leak, freed by the test that made them (free_tracked).
+static std::set<void *> *tracked = nullptr;
 
 extern "C" void *fqueue_test_malloc(size_t size) {
   if (fail_in >= 0 && fail_in-- == 0) {
@@ -30,12 +35,29 @@ extern "C" void *fqueue_test_malloc(size_t size) {
   }
   void *p = std::malloc(size);
   if (p) ++live, ++allocs;
+  if (p && tracked) tracked->insert(p);
   return p;
 }
 
 extern "C" void fqueue_test_free(void *ptr) {
   if (ptr) --live;
+  if (tracked) tracked->erase(ptr);
   std::free(ptr);
+}
+
+// Track the blocks allocated from here on.
+static void track(std::set<void *> &blocks) { tracked = &blocks; }
+
+// Free the tracked blocks still alive (leaked by saturated counts); returns
+// their number.
+static long free_tracked() {
+  std::set<void *> &blocks = *tracked;
+  tracked = nullptr;
+  for (void *p : blocks)
+    fqueue_test_free(p);
+  long n = (long)blocks.size();
+  blocks.clear();
+  return n;
 }
 
 // Fail the k-th allocation (from 0) of the next operation.
@@ -105,7 +127,7 @@ static long in_place_oom_on_clone(const Q *q, std::deque<int> model,
                                   int value) {
   std::vector<int> expected(model.begin(), model.end());
   Q c;
-  REQUIRE(Api<Q>::clone(&c, q) == FQUEUE_OK);
+  Api<Q>::clone(&c, q);
   long failures = in_place_under_oom(
       [&](Q *p) { return Api<Q>::push_in_place(p, value); }, &c, expected);
   expected.push_back(value);
@@ -250,7 +272,7 @@ TEST_CASE("pushing past the length limit reports FQUEUE_OVERFLOW",
     REQUIRE(fqueue_push(&out, q.get(), -1) == FQUEUE_OVERFLOW);
     REQUIRE(contents(q) == expected);
     fqueue c;
-    REQUIRE(fqueue_clone(&c, q.get()) == FQUEUE_OK);
+    fqueue_clone(&c, q.get());
     REQUIRE(fqueue_push_in_place(&c, -1) == FQUEUE_OVERFLOW);
     REQUIRE(contents(&c) == expected);
     fqueue_destroy(&c);
@@ -261,73 +283,19 @@ TEST_CASE("pushing past the length limit reports FQUEUE_OVERFLOW",
   REQUIRE(live == start);
 }
 
-TEST_CASE("too many references to a node report FQUEUE_OVERFLOW", "[limits]") {
-  long start = live;
-  {
-    // A version in the middle of a rotation, so that its rotation's nodes are
-    // shared too.
-    Q q;
-    for (int i = 0; i < 9; ++i)
-      q = q.push(i);
-    q = *q.pop();
-    std::vector<int> expected = contents(q);
-
-    // Clone until some node of q is at the limit; the failing clone is undone.
-    std::vector<fqueue> clones;
-    fqueue_status s;
-    for (;;) {
-      fqueue c;
-      s = fqueue_clone(&c, q.get());
-      if (s != FQUEUE_OK) break;
-      clones.push_back(c);
-      REQUIRE(clones.size() <= TEST_REFS_LIMIT);
-    }
-    REQUIRE(s == FQUEUE_OVERFLOW);
-    REQUIRE(clones.size() > TEST_REFS_LIMIT / 2);
-    long saturated = live;
-
-    // Every operation on q would add a reference to a saturated node.
-    fqueue out;
-    REQUIRE(fqueue_push(&out, q.get(), -1) == FQUEUE_OVERFLOW);
-    REQUIRE(fqueue_pop(&out, q.get()) == FQUEUE_OVERFLOW);
-    // In place on one of the clones: its nodes are just as saturated.
-    int v = -1;
-    REQUIRE(fqueue_push_in_place(&clones.back(), -1) == FQUEUE_OVERFLOW);
-    REQUIRE(fqueue_pop_in_place(&clones.back(), &v) == FQUEUE_OVERFLOW);
-    REQUIRE(v == -1);
-    REQUIRE(fqueue_size(&clones.back()) == expected.size());
-    REQUIRE(live == saturated);
-
-    // Destroying some clones makes room again; all versions are intact.
-    for (int i = 0; i < 8; ++i) {
-      fqueue_destroy(&clones.back());
-      clones.pop_back();
-    }
-    REQUIRE(contents(q) == expected);
-    REQUIRE(contents(&clones.front()) == expected);
-    expected.push_back(-1);
-    REQUIRE(contents(q.push(-1)) == expected);
-
-    for (fqueue &c : clones)
-      fqueue_destroy(&c);
-  }
-  REQUIRE(live == start);
-}
-
-TEST_CASE("random operations on many shared versions never overflow",
+TEST_CASE("random operations on many shared versions with saturated counts",
           "[limits]") {
-  // Versions are cloned, pushed, popped and destroyed at random while the
-  // reference limit is hit again and again. A reference the overflow check
-  // missed would let counts climb past the limit plus headroom, which the
-  // assert in node_retain catches; every successful result is checked against
-  // a model.
+  // Versions are cloned, pushed, popped and destroyed at random while counts
+  // saturate again and again; every result is checked against a model, and
+  // the sanitizers check that no node is freed while referenced.
   long start = live;
+  std::set<void *> blocks;
+  track(blocks);
   {
     std::vector<fqueue> versions(1);
     fqueue_init(&versions[0]);
     std::vector<std::deque<int>> models{{}};
     uint64_t x = 0x2545F4914F6CDD1Du;
-    long overflows = 0, in_place_overflows = 0;
     for (int k = 0; k < 20000; ++k) {
       x ^= x << 13;
       x ^= x >> 7;
@@ -348,7 +316,7 @@ TEST_CASE("random operations on many shared versions never overflow",
         s = pop ? fqueue_pop_in_place(&versions[j], &v)
                 : fqueue_push_in_place(&versions[j], k);
         if (s == FQUEUE_OVERFLOW) {
-          ++in_place_overflows;
+          REQUIRE((!pop && models[j].size() == TEST_LEN_LIMIT));
         } else if (s == FQUEUE_EMPTY) {
           REQUIRE(models[j].empty());
         } else {
@@ -375,7 +343,8 @@ TEST_CASE("random operations on many shared versions never overflow",
         continue;
       case 1:
       case 2:
-        s = fqueue_clone(&out, &versions[i]);
+        fqueue_clone(&out, &versions[i]);
+        s = FQUEUE_OK;
         break;
       case 3:
       case 4:
@@ -388,7 +357,7 @@ TEST_CASE("random operations on many shared versions never overflow",
         break;
       }
       if (s == FQUEUE_OVERFLOW) {
-        ++overflows;
+        REQUIRE(models[i].size() == TEST_LEN_LIMIT);
         continue;
       }
       if (s == FQUEUE_EMPTY) {
@@ -401,11 +370,10 @@ TEST_CASE("random operations on many shared versions never overflow",
       versions.push_back(out);
       models.push_back(std::move(model));
     }
-    REQUIRE(overflows > 100);
-    REQUIRE(in_place_overflows > 0);
     for (fqueue &v : versions)
       fqueue_destroy(&v);
   }
+  REQUIRE(free_tracked() > 0); // counts did saturate
   REQUIRE(live == start);
 }
 
@@ -423,7 +391,7 @@ TEST_CASE("an iterator step that runs out of memory can be retried",
     std::vector<int> expected = contents(q);
 
     fqueue_iter it;
-    REQUIRE(fqueue_iter_init(&it, q.get()) == FQUEUE_OK);
+    fqueue_iter_init(&it, q.get());
     std::vector<int> got;
     long failures = 0;
     for (;;) {
@@ -450,11 +418,14 @@ TEST_CASE("an iterator step that runs out of memory can be retried",
   REQUIRE(live == start);
 }
 
-TEMPLATE_TEST_CASE("too many references report FQUEUE_OVERFLOW in both "
+TEMPLATE_TEST_CASE("a saturated reference count pins its node in both "
                    "instantiations",
                    "[limits]", fqueue, fqueue_sync) {
   using A = Api<TestType>;
   long start = live;
+  std::set<void *> blocks;
+  track(blocks);
+  long nodes;
   {
     // A version in the middle of a rotation, so that its rotation's nodes are
     // shared too.
@@ -464,39 +435,41 @@ TEMPLATE_TEST_CASE("too many references report FQUEUE_OVERFLOW in both "
       REQUIRE(A::push_in_place(&q, i) == FQUEUE_OK);
     REQUIRE(A::pop_in_place(&q, nullptr) == FQUEUE_OK);
     std::vector<int> expected = contents_of(&q);
+    nodes = live - start;
 
-    std::vector<TestType> clones;
-    fqueue_status s;
-    for (;;) {
-      TestType c;
-      s = A::clone(&c, &q);
-      if (s != FQUEUE_OK) break;
-      clones.push_back(c);
-      REQUIRE(clones.size() <= TEST_REFS_LIMIT);
-    }
-    REQUIRE(s == FQUEUE_OVERFLOW);
-    long saturated = live;
+    // Far more clones than the limit: none fails, nothing is allocated.
+    std::vector<TestType> clones(3 * TEST_REFS_LIMIT);
+    for (TestType &c : clones)
+      A::clone(&c, &q);
+    REQUIRE(live - start == nodes);
 
+    // Every operation still works, persistent and in place.
     TestType out;
+    REQUIRE(A::push(&out, &q, -1) == FQUEUE_OK);
+    std::vector<int> pushed = expected;
+    pushed.push_back(-1);
+    REQUIRE(contents_of(&out) == pushed);
+    A::destroy(&out);
+    REQUIRE(A::pop(&out, &q) == FQUEUE_OK);
+    REQUIRE(contents_of(&out) == std::vector<int>(expected.begin() + 1, expected.end()));
+    A::destroy(&out);
+    REQUIRE(A::push_in_place(&clones.back(), -1) == FQUEUE_OK);
+    REQUIRE(contents_of(&clones.back()) == pushed);
     int v = -1;
-    REQUIRE(A::push(&out, &q, -1) == FQUEUE_OVERFLOW);
-    REQUIRE(A::pop(&out, &q) == FQUEUE_OVERFLOW);
-    REQUIRE(A::push_in_place(&clones.back(), -1) == FQUEUE_OVERFLOW);
-    REQUIRE(A::pop_in_place(&clones.back(), &v) == FQUEUE_OVERFLOW);
-    REQUIRE(v == -1);
-    REQUIRE(A::size(&clones.back()) == expected.size());
-    REQUIRE(live == saturated);
+    REQUIRE(A::pop_in_place(&clones.front(), &v) == FQUEUE_OK);
+    REQUIRE(v == expected.front());
 
-    for (int i = 0; i < 8; ++i) {
-      A::destroy(&clones.back());
-      clones.pop_back();
-    }
-    REQUIRE(contents_of(&q) == expected);
-    REQUIRE(contents_of(&clones.front()) == expected);
+    // Destroying the clones leaves q intact.
     for (TestType &c : clones)
       A::destroy(&c);
+    REQUIRE(contents_of(&q) == expected);
     A::destroy(&q);
   }
+  // The saturated nodes stay, and only nodes of q: nothing else leaks.
+  long leaked = live - start;
+  REQUIRE(leaked > 0);
+  REQUIRE(leaked <= nodes);
+  REQUIRE(free_tracked() == leaked);
   REQUIRE(live == start);
 }
 
@@ -614,7 +587,7 @@ TEMPLATE_TEST_CASE("an in-place operation that needs a slab fails without a "
   for (int k = 0; k < 20000; ++k) {
     if (k % 2 == 0) {
       kept.emplace_back();
-      REQUIRE(A::clone(&kept.back(), &q) == FQUEUE_OK);
+      A::clone(&kept.back(), &q);
     }
     bool push = model.size() < 30 && (model.size() < 20 || k % 3 != 0);
     arm(0);

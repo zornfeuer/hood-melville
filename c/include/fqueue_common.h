@@ -28,9 +28,7 @@ typedef enum fqueue_status {
   FQUEUE_OK = 0,
   FQUEUE_EMPTY,    // pop on an empty queue, or an exhausted iterator
   FQUEUE_NOMEM,    // a node could not be allocated
-  FQUEUE_OVERFLOW, // the queue would exceed UINT32_MAX elements, or a node
-                   // would get more references than its counter holds
-                   // (reachable only by leaking versions)
+  FQUEUE_OVERFLOW, // the queue would exceed UINT32_MAX elements
 } fqueue_status;
 
 // Human-readable description of a status, e.g. for error messages.
@@ -39,7 +37,7 @@ static inline const char* fqueue_strerror(fqueue_status status) {
   case FQUEUE_OK:       return "success";
   case FQUEUE_EMPTY:    return "queue is empty";
   case FQUEUE_NOMEM:    return "out of memory";
-  case FQUEUE_OVERFLOW: return "too many elements or references";
+  case FQUEUE_OVERFLOW: return "too many elements";
   }
   return "unknown fqueue status";
 }

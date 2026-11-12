@@ -24,10 +24,7 @@ struct fqueue_error : std::runtime_error {
 class Q {
 public:
   Q() { fqueue_init(&q_); }
-  Q(const Q &other) {
-    fqueue_status s = fqueue_clone(&q_, &other.q_);
-    if (s != FQUEUE_OK) throw fqueue_error(s); // q_ is not initialized
-  }
+  Q(const Q &other) { fqueue_clone(&q_, &other.q_); }
   Q(Q &&other) noexcept : q_(other.q_) { fqueue_init(&other.q_); }
   Q &operator=(Q other) noexcept {
     std::swap(q_, other.q_);
@@ -91,7 +88,7 @@ inline int front_of(const fqueue *q) {
 inline std::vector<int> contents(const fqueue *q) {
   std::vector<int> out;
   fqueue_iter it;
-  REQUIRE(fqueue_iter_init(&it, q) == FQUEUE_OK);
+  fqueue_iter_init(&it, q);
   int v;
   fqueue_status s;
   while ((s = fqueue_iter_next(&it, &v)) == FQUEUE_OK)

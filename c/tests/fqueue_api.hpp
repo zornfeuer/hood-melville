@@ -41,7 +41,7 @@ template <class Q> std::vector<int> contents_of(const Q *q) {
   using A = Api<Q>;
   std::vector<int> out;
   typename A::iter it;
-  REQUIRE(A::iter_init(&it, q) == FQUEUE_OK);
+  A::iter_init(&it, q);
   int v;
   fqueue_status s;
   while ((s = A::iter_next(&it, &v)) == FQUEUE_OK)

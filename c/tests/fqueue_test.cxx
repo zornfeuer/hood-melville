@@ -260,7 +260,7 @@ TEST_CASE("fqueue_clone shares contents and outlives the original",
   q = *q.pop();
 
   fqueue c;
-  REQUIRE(fqueue_clone(&c, q.get()) == FQUEUE_OK);
+  fqueue_clone(&c, q.get());
   std::vector<int> expected = contents(q);
   REQUIRE(contents(&c) == expected);
 
@@ -279,7 +279,7 @@ TEST_CASE("fqueue_iter: empty queue, end of iteration, outliving the version",
   fqueue_iter it;
   {
     Q empty;
-    REQUIRE(fqueue_iter_init(&it, empty.get()) == FQUEUE_OK);
+    fqueue_iter_init(&it, empty.get());
   }
   REQUIRE(fqueue_iter_next(&it, &v) == FQUEUE_EMPTY);
   REQUIRE(v == 7); // left untouched
@@ -294,7 +294,7 @@ TEST_CASE("fqueue_iter: empty queue, end of iteration, outliving the version",
       q = q.push(i);
     q = *q.pop();
     expected = contents(q);
-    REQUIRE(fqueue_iter_init(&it, q.get()) == FQUEUE_OK);
+    fqueue_iter_init(&it, q.get());
     REQUIRE(fqueue_iter_next(&it, &v) == FQUEUE_OK);
     REQUIRE(v == expected[0]);
   }
@@ -307,7 +307,7 @@ TEST_CASE("fqueue_iter: empty queue, end of iteration, outliving the version",
 
   // Destroying an iterator before the end releases its clone.
   Q q = Q().push(1).push(2).push(3);
-  REQUIRE(fqueue_iter_init(&it, q.get()) == FQUEUE_OK);
+  fqueue_iter_init(&it, q.get());
   REQUIRE(fqueue_iter_next(&it, &v) == FQUEUE_OK);
   fqueue_iter_destroy(&it);
   REQUIRE(contents(q) == std::vector<int>{1, 2, 3});
@@ -394,7 +394,7 @@ static void explore(const fqueue *q, std::deque<int> &model, int depth,
 
   std::vector<int> expected(model.begin(), model.end());
   fqueue c;
-  REQUIRE(fqueue_clone(&c, q) == FQUEUE_OK);
+  fqueue_clone(&c, q);
   REQUIRE(contents(&c) == expected);
 
   // In-place operations on the clone, which shares every node with q.

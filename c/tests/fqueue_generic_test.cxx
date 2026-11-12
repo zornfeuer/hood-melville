@@ -38,7 +38,7 @@ TEST_CASE("pointq: struct elements in a persistent history", "[generic]") {
   for (size_t k = 0; k < versions.size(); ++k) {
     std::vector<point> got;
     pointq_iter it;
-    REQUIRE(pointq_iter_init(&it, &versions[k]) == FQUEUE_OK);
+    pointq_iter_init(&it, &versions[k]);
     point p;
     while (pointq_iter_next(&it, &p) == FQUEUE_OK)
       got.push_back(p);

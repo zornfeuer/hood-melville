@@ -5,7 +5,7 @@ fn Suite(comptime Q: type) type {
         fn check(q: Q, model: []const i32) !void {
             try std.testing.expectEqual(model.len, q.len());
             try std.testing.expectEqual(if (model.len == 0) null else model[0], q.front());
-            var it = try q.iterator();
+            var it = q.iterator();
             defer it.deinit(a);
             for (model) |v| try std.testing.expectEqual(v, (try it.next(a)).?);
             try std.testing.expectEqual(@as(?i32, null), try it.next(a));
@@ -38,7 +38,7 @@ fn Suite(comptime Q: type) type {
             defer model.deinit(a);
             var x: u64 = 12345;
             for (0..400) |i| {
-                var old = try q.clone();
+                var old = q.clone();
                 defer old.deinit(a);
                 x ^= x << 13;
                 x ^= x >> 7;
@@ -68,7 +68,7 @@ fn Suite(comptime Q: type) type {
                     try std.testing.expectEqual(first, q.front());
                     return err;
                 };
-                var old = try q.clone();
+                var old = q.clone();
                 defer old.deinit(allocator);
                 var child = q.push(allocator, 100) catch |err| {
                     try std.testing.expect(std.meta.eql(old, q));
@@ -138,7 +138,7 @@ fn Suite(comptime Q: type) type {
                 try q.pushInPlace(allocator, @intCast(i));
                 model[i] = @intCast(i);
             }
-            var sibling = if (shared) try q.clone() else Q.init();
+            var sibling = if (shared) q.clone() else Q.init();
             defer sibling.deinit(allocator);
             const before = q;
             if (remove) {
@@ -188,7 +188,7 @@ const Sync = @import("root.zig").SyncQueue(i32);
 fn checkThread(q: Sync, model: []const i32, allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(model.len, q.len());
     try std.testing.expectEqual(if (model.len == 0) null else model[0], q.front());
-    var it = try q.iterator();
+    var it = q.iterator();
     defer it.deinit(allocator);
     for (model) |v| try std.testing.expectEqual(v, (try it.next(allocator)).?);
     try std.testing.expectEqual(@as(?i32, null), try it.next(allocator));
@@ -211,7 +211,7 @@ const Worker = struct {
             var model: [80]i32 = undefined;
             for (0..size) |i| model[i] = @intCast(i);
             try checkThread(parent, model[0..size], self.allocator);
-            var q = try parent.clone();
+            var q = parent.clone();
             defer q.deinit(self.allocator);
             const value: i32 = @intCast(round + self.id * 1000);
             var pushed = try parent.push(self.allocator, value);
@@ -224,7 +224,7 @@ const Worker = struct {
                 try checkThread(popped, model[1..size], self.allocator);
             }
             try q.pushInPlace(self.allocator, value);
-            var sibling = try q.clone();
+            var sibling = q.clone();
             defer sibling.deinit(self.allocator);
             try checkThread(q, model[0 .. size + 1], self.allocator);
             for (model[0 .. size + 1]) |v| try std.testing.expectEqual(v, (try q.popInPlace(self.allocator)).?);
@@ -299,7 +299,7 @@ test "пул узлов: статистика, удержание пика и tr
     try std.testing.expect(s.live >= 20000 and s.live <= 3 * 20000);
     try std.testing.expectEqual(@as(usize, 0), Q.node_pool.trim(a)); // q жива
 
-    var c = try q.clone();
+    var c = q.clone();
     try std.testing.expectEqual(s.live, Q.node_pool.stats().live); // общие узлы
     c.deinit(a);
     // Сжатие: плиты остаются; рост снова — без новых плит.
@@ -329,7 +329,7 @@ const PoolWorker = struct {
         };
     }
     fn work(self: *@This()) !void {
-        var q = try self.base.clone();
+        var q = self.base.clone();
         defer q.deinit(self.allocator);
         while (try q.popInPlace(self.allocator)) |v| self.sum += v;
         // Свои узлы: короткие очереди остаются в кэше потока до выхода.
@@ -483,7 +483,7 @@ test "пул узлов: операция на месте, которой нуж
     defer model.deinit(std.testing.allocator);
     var failures: usize = 0;
     for (0..20000) |k| {
-        if (k % 2 == 0) try kept.append(std.testing.allocator, try q.clone());
+        if (k % 2 == 0) try kept.append(std.testing.allocator, q.clone());
         const push = model.items.len < 30 and (model.items.len < 20 or k % 3 != 0);
         failing.fail_index = failing.alloc_index;
         const r = if (push) q.pushInPlace(a, @intCast(k)) else if (q.popInPlace(a)) |v| blk: {
@@ -495,7 +495,7 @@ test "пул узлов: операция на месте, которой нуж
             try std.testing.expectEqual(error.OutOfMemory, err);
             failures += 1;
             // Содержимое прежнее (обход — тем же источником плит).
-            var it = try q.iterator();
+            var it = q.iterator();
             defer it.deinit(a);
             for (model.items) |m| try std.testing.expectEqual(m, (try it.next(a)).?);
             try std.testing.expectEqual(@as(?i32, null), try it.next(a));

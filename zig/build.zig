@@ -15,7 +15,34 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         }),
     });
-    b.step("test", "Проверка очереди и утечек").dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Проверка очереди и утечек");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+    // Переполнение счётчика ссылок — недопустимое поведение: безопасные
+    // сборки должны завершиться паникой (tests/refs_overflow.zig).
+    inline for (.{ .Debug, .ReleaseSafe }) |mode| {
+        inline for (.{ false, true }) |atomic| {
+            const opts = b.addOptions();
+            opts.addOption(bool, "atomic", atomic);
+            const exe = b.addExecutable(.{
+                .name = "refs_overflow",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/refs_overflow.zig"),
+                    .target = target,
+                    .optimize = mode,
+                }),
+            });
+            exe.root_module.addImport("fqueue", b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = target,
+                .optimize = mode,
+            }));
+            exe.root_module.addOptions("refs_overflow_options", opts);
+            const run = b.addRunArtifact(exe);
+            run.addCheck(.{ .expect_term = .{ .signal = .ABRT } });
+            run.addCheck(.{ .expect_stderr_match = "reached unreachable code" });
+            test_step.dependOn(&run.step);
+        }
+    }
 
     const tsan = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -65,7 +92,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const fmt = b.addFmt(.{
-        .paths = &.{ "build.zig", "src", "bench" },
+        .paths = &.{ "build.zig", "src", "bench", "tests" },
         .check = true,
     });
     b.step("fmt", "Проверка форматирования Zig").dependOn(&fmt.step);

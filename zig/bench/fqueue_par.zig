@@ -57,7 +57,7 @@ fn buildShared(shared: *Shared) !void {
     defer q.deinit(allocator);
     var j: i32 = 0;
     while (j < shared_count * 24) : (j += 1) {
-        if (@rem(j, 24) == 0) shared[@intCast(@divExact(j, 24))] = try q.clone();
+        if (@rem(j, 24) == 0) shared[@intCast(@divExact(j, 24))] = q.clone();
         const next = if (@rem(j, 3) == 2) (try q.pop(allocator)).? else try q.push(allocator, j);
         q.deinit(allocator);
         q = next;
@@ -177,9 +177,8 @@ fn readSnapshots(snapshot: *Snapshot, out: *ReaderResult) !void {
     while (!snapshot.done.load(.monotonic)) {
         // Итератор обходит копию снимка; копия снимается под мьютексом.
         snapshot.mutex.lockUncancelable(snapshot.io);
-        const copy = snapshot.slot.iterator();
+        var it = snapshot.slot.iterator();
         snapshot.mutex.unlock(snapshot.io);
-        var it = try copy;
         defer it.deinit(allocator);
         while (try it.next(allocator)) |value| {
             sum = mix(sum, value);
@@ -196,7 +195,7 @@ fn runSnapshot(io: std.Io, readers: usize, elapsed: *i96, result: *ReaderResult)
     defer q.deinit(allocator);
     var i: i32 = 0;
     while (i < snap_size) : (i += 1) try q.pushInPlace(allocator, i);
-    var snapshot: Snapshot = .{ .io = io, .slot = try q.clone() };
+    var snapshot: Snapshot = .{ .io = io, .slot = q.clone() };
     defer snapshot.slot.deinit(allocator);
     const threads = try allocator.alloc(std.Thread, readers);
     defer allocator.free(threads);
@@ -211,7 +210,7 @@ fn runSnapshot(io: std.Io, readers: usize, elapsed: *i96, result: *ReaderResult)
         h = mix(h, (try q.popInPlace(allocator)).?);
         if (@rem(k + 1, period) == 0) {
             // Копия снимается и прежний снимок освобождается вне мьютекса.
-            const copy = try q.clone();
+            const copy = q.clone();
             snapshot.mutex.lockUncancelable(io);
             var old = snapshot.slot;
             snapshot.slot = copy;

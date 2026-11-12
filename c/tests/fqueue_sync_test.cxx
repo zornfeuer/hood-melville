@@ -21,7 +21,7 @@ static void explore(const Q *q, std::deque<int> &model, int depth, long &states)
   REQUIRE(contents_of(q) == as_vector(model));
 
   Q c;
-  REQUIRE(A::clone(&c, q) == FQUEUE_OK);
+  A::clone(&c, q);
   REQUIRE(A::push_in_place(&c, -1) == FQUEUE_OK);
   int v = -2;
   REQUIRE(A::pop_in_place(&c, &v) == FQUEUE_OK);
@@ -100,7 +100,7 @@ TEMPLATE_TEST_CASE("threads derive versions from shared versions", "[sync]",
       for (int k = 0; k < ROUNDS && !failures[t]; ++k) {
         size_t idx = xorshift(x) % shared.size();
         TestType q;
-        if (A::clone(&q, &shared[idx]) != FQUEUE_OK) { failures[t] = 1; break; }
+        A::clone(&q, &shared[idx]);
         std::deque<int> m = models[idx];
         for (int j = 0; j < 4; ++j) {
           int value = 1000000 * (t + 1) + k * 4 + j;
@@ -121,7 +121,7 @@ TEMPLATE_TEST_CASE("threads derive versions from shared versions", "[sync]",
         }
         // Contents through the iterator (a clone popped in place).
         typename A::iter it;
-        if (A::iter_init(&it, &q) != FQUEUE_OK) failures[t] = 5;
+        A::iter_init(&it, &q);
         int v;
         for (int expected : m)
           if (A::iter_next(&it, &v) != FQUEUE_OK || v != expected) failures[t] = 6;
@@ -153,7 +153,7 @@ TEMPLATE_TEST_CASE("versions are destroyed in other threads", "[sync]",
     REQUIRE(A::push_in_place(&base, i) == FQUEUE_OK);
   std::vector<TestType> versions(VERSIONS);
   for (int i = 0; i < VERSIONS; ++i) {
-    REQUIRE(A::clone(&versions[i], &base) == FQUEUE_OK);
+    A::clone(&versions[i], &base);
     for (int k = 0; k < i * N / VERSIONS; ++k)
       REQUIRE(A::pop_in_place(&versions[i], nullptr) == FQUEUE_OK);
   }
@@ -181,7 +181,7 @@ TEMPLATE_TEST_CASE("threads read shared nodes, the last owner frees them",
       REQUIRE(A::push_in_place(&base, i) == FQUEUE_OK);
     std::vector<TestType> clones(THREADS);
     for (TestType &c : clones)
-      REQUIRE(A::clone(&c, &base) == FQUEUE_OK);
+      A::clone(&c, &base);
     A::destroy(&base);
     std::vector<long> sums(THREADS, 0);
     std::vector<std::thread> threads;

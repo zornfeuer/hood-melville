@@ -39,7 +39,7 @@ int main(void) {
     s = t;
   }
   strq_iter it;
-  check(strq_iter_init(&it, &s));
+  strq_iter_init(&it, &s);
   const char *w;
   fqueue_status st;
   while ((st = strq_iter_next(&it, &w)) == FQUEUE_OK)
