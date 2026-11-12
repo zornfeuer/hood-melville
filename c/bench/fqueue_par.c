@@ -26,6 +26,23 @@
 
 #include "fqueue.h"
 
+// С -DFQUEUE_BENCH_POOL — то же на fqueue_pooled_sync (пул узлов, docs/pool.md).
+#ifdef FQUEUE_BENCH_POOL
+#define fqueue_sync fqueue_pooled_sync
+#define fqueue_sync_clone fqueue_pooled_sync_clone
+#define fqueue_sync_destroy fqueue_pooled_sync_destroy
+#define fqueue_sync_front fqueue_pooled_sync_front
+#define fqueue_sync_init fqueue_pooled_sync_init
+#define fqueue_sync_iter_destroy fqueue_pooled_sync_iter_destroy
+#define fqueue_sync_iter_init fqueue_pooled_sync_iter_init
+#define fqueue_sync_iter_next fqueue_pooled_sync_iter_next
+#define fqueue_sync_iter fqueue_pooled_sync_iter
+#define fqueue_sync_pop_in_place fqueue_pooled_sync_pop_in_place
+#define fqueue_sync_pop fqueue_pooled_sync_pop
+#define fqueue_sync_push_in_place fqueue_pooled_sync_push_in_place
+#define fqueue_sync_push fqueue_pooled_sync_push
+#endif
+
 enum { TASKS = 256, OPS = 40000, SHARED = 64 };
 enum { SNAP_SIZE = 4096, SNAP_PAIRS = 1000000, PERIOD = 512 };
 

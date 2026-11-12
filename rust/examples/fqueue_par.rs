@@ -38,7 +38,11 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+// С `--features pool` — то же на очереди с пулом узлов (`docs/pool.md`).
+#[cfg(not(feature = "pool"))]
 type Q = hood_melville::SyncQueue<i32>;
+#[cfg(feature = "pool")]
+type Q = hood_melville::SyncPooledQueue<i32>;
 
 const TASKS: u64 = 256;
 const OPS: i32 = 40_000;
@@ -62,7 +66,7 @@ fn mix(h: u64, x: i32) -> u64 {
 
 fn shared_versions() -> Vec<Q> {
     let mut versions = Vec::new();
-    let mut q = Q::new_sync();
+    let mut q = Q::default();
     for j in 0..i32::try_from(SHARED * 24).unwrap() {
         if j % 24 == 0 {
             versions.push(q.clone());
@@ -80,7 +84,7 @@ fn shared_versions() -> Vec<Q> {
 fn run_task(shared: &[Q], share: u64, task: u64) -> u64 {
     let mut x = 0x9E37_79B9_7F4A_7C15 ^ (task + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     let mut h = 0;
-    let mut q = Q::new_sync();
+    let mut q = Q::default();
     for k in 0..OPS {
         xorshift(&mut x);
         let parent = if x % 100 < share {
@@ -141,7 +145,7 @@ fn run_threads(shared: &[Q], share: u64, p: usize) -> (u64, Duration) {
 }
 
 fn run_snapshot(readers: usize) -> (u64, Duration, u64, u64) {
-    let mut q = Q::new_sync();
+    let mut q = Q::default();
     for i in 0..SNAP_SIZE {
         q.push_mut(i);
     }

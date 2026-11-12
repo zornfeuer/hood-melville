@@ -110,6 +110,32 @@ fn run_mixed_mut(n: i32, ph: &mut Phases) -> u64 {
     h
 }
 
+/// Волны: живое множество растёт до N и сжимается до N/100, `WAVES` раз,
+/// через операции на месте; затем опустошение (удержание памяти после
+/// сжатия, `docs/pool.md`).
+const WAVES: usize = 4;
+
+fn run_wave(n: i32, ph: &mut Phases) -> u64 {
+    let n = usize::try_from(n).unwrap();
+    let (mut h, mut i) = (0, 0);
+    let mut q = Q::default();
+    for _ in 0..WAVES {
+        while q.len() < n {
+            q.push_mut(i);
+            i += 1;
+        }
+        ph.mark("grow");
+        while q.len() > n / 100 {
+            h = mix(h, pop_value(&mut q));
+        }
+        ph.mark("shrink");
+    }
+    while !q.is_empty() {
+        h = mix(h, pop_value(&mut q));
+    }
+    h
+}
+
 /// Как mixed, но все версии живы до конца и освобождаются в порядке создания.
 fn last(v: &[Q]) -> &Q {
     v.last().expect("версий не меньше одной")
@@ -189,7 +215,7 @@ fn run_branching(n: i32, ph: &mut Phases) -> u64 {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let [_, scenario, n] = args.as_slice() else {
-        eprintln!("usage: fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut> <N>");
+        eprintln!("usage: fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut|wave> <N>");
         return ExitCode::from(2);
     };
     let Ok(n) = n.parse() else {
@@ -207,6 +233,7 @@ fn main() -> ExitCode {
         "branching" => run_branching(n, &mut ph),
         "fill_mut" => run_fill_mut(n, &mut ph),
         "mixed_mut" => run_mixed_mut(n, &mut ph),
+        "wave" => run_wave(n, &mut ph),
         _ => {
             eprintln!("unknown scenario: {scenario}");
             return ExitCode::from(2);

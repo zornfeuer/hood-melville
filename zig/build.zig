@@ -46,17 +46,23 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    const par = b.addExecutable(.{
-        .name = "fqueue_par",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/fqueue_par.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    par.root_module.addImport("fqueue", lib);
-    b.installArtifact(par);
+    // fqueue_par и fqueue_par_pool (пул узлов, docs/pool.md).
+    inline for (.{ false, true }) |pool| {
+        const par_opts = b.addOptions();
+        par_opts.addOption(bool, "pool", pool);
+        const par = b.addExecutable(.{
+            .name = if (pool) "fqueue_par_pool" else "fqueue_par",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("bench/fqueue_par.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        par.root_module.addImport("fqueue", lib);
+        par.root_module.addOptions("bench_options", par_opts);
+        b.installArtifact(par);
+    }
 
     const fmt = b.addFmt(.{
         .paths = &.{ "build.zig", "src", "bench" },

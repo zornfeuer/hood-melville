@@ -2,7 +2,7 @@
 // Rust-двойник: rust/examples/fqueue_bench.rs —
 // сценарии и контрольная сумма должны совпадать один в один.
 //
-// Использование: fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut> <N>
+// Использование: fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut|wave> <N>
 // fill_mut, mixed_mut — те же истории через fqueue_push_in_place /
 // fqueue_pop_in_place (отдельный бенчмарк, `just bench-compare-mut`).
 // Печатает контрольную сумму извлечённых значений (зависит от порядка).
@@ -181,6 +181,30 @@ static uint64_t run_mixed_mut(int n) {
   return h;
 }
 
+// Волны: живое множество растёт до N и сжимается до N/100, WAVES раз, через
+// операции на месте; затем опустошение. Для удержания памяти после сжатия
+// (пул узлов, docs/pool.md); след памяти снимается снаружи.
+enum { WAVES = 4 };
+
+static uint64_t run_wave(int n) {
+  uint64_t h = 0;
+  int i = 0;
+  fqueue q;
+  fqueue_init(&q);
+  for (int w = 0; w < WAVES; ++w) {
+    while (fqueue_size(&q) < (size_t)n)
+      check(fqueue_push_in_place(&q, i++));
+    phase("grow");
+    while (fqueue_size(&q) > (size_t)(n / 100))
+      h = mix(h, pop_value(&q));
+    phase("shrink");
+  }
+  while (!fqueue_is_empty(&q))
+    h = mix(h, pop_value(&q));
+  fqueue_destroy(&q);
+  return h;
+}
+
 typedef struct {
   fqueue *items;
   size_t  len;
@@ -283,7 +307,7 @@ static uint64_t run_branching(int n) {
 
 int main(int argc, char **argv) {
   if (argc != 3) {
-    fprintf(stderr, "usage: %s <fill|mixed|persistent|branching|fill_mut|mixed_mut> <N>\n",
+    fprintf(stderr, "usage: %s <fill|mixed|persistent|branching|fill_mut|mixed_mut|wave> <N>\n",
             argv[0]);
     return 2;
   }
@@ -304,6 +328,8 @@ int main(int argc, char **argv) {
     h = run_fill_mut(n);
   else if (strcmp(argv[1], "mixed_mut") == 0)
     h = run_mixed_mut(n);
+  else if (strcmp(argv[1], "wave") == 0)
+    h = run_wave(n);
   else {
     fprintf(stderr, "unknown scenario: %s\n", argv[1]);
     return 2;

@@ -7,7 +7,7 @@ const Q = if (options.pool)
 else if (options.sync) fqueue.SyncQueue(i32) else fqueue.Queue(i32);
 const allocator = std.heap.c_allocator;
 
-const Scenario = enum { fill, mixed, persistent, branching, fill_mut, mixed_mut };
+const Scenario = enum { fill, mixed, persistent, branching, fill_mut, mixed_mut, wave };
 
 fn mix(h: u64, x: i32) u64 {
     return h *% 31 +% @as(u64, @bitCast(@as(i64, x)));
@@ -114,6 +114,27 @@ fn runMixedMut(n: i32, ph: *Phases) !u64 {
     return h;
 }
 
+// Волны: живое множество растёт до N и сжимается до N/100, waves раз, через
+// операции на месте; затем опустошение (удержание памяти после сжатия,
+// docs/pool.md).
+const waves = 4;
+
+fn runWave(n: i32, ph: *Phases) !u64 {
+    var q = Q.init();
+    defer q.deinit(allocator);
+    var h: u64 = 0;
+    var i: i32 = 0;
+    const big: u32 = @intCast(n);
+    for (0..waves) |_| {
+        while (q.len() < big) : (i += 1) try q.pushInPlace(allocator, i);
+        ph.mark("grow");
+        while (q.len() > big / 100) h = mix(h, (try q.popInPlace(allocator)).?);
+        ph.mark("shrink");
+    }
+    while (!q.isEmpty()) h = mix(h, (try q.popInPlace(allocator)).?);
+    return h;
+}
+
 fn last(versions: *const std.ArrayList(Q)) *const Q {
     return &versions.items[versions.items.len - 1];
 }
@@ -198,7 +219,7 @@ fn runBranching(n: i32, ph: *Phases) !u64 {
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 3) {
-        std.debug.print("usage: fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut> <N>\n", .{});
+        std.debug.print("usage: fqueue_bench <fill|mixed|persistent|branching|fill_mut|mixed_mut|wave> <N>\n", .{});
         std.process.exit(2);
     }
     const scenario = std.meta.stringToEnum(Scenario, args[1]) orelse {
@@ -226,6 +247,7 @@ pub fn main(init: std.process.Init) !void {
         .branching => try runBranching(n, &ph),
         .fill_mut => try runFillMut(n, &ph),
         .mixed_mut => try runMixedMut(n, &ph),
+        .wave => try runWave(n, &ph),
     };
     var buffer: [32]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, "{d}\n", .{h});

@@ -18,7 +18,15 @@
 //!     снимков и элементов.
 
 const std = @import("std");
-const Q = @import("fqueue").SyncQueue(i32);
+const pooled = @import("bench_options").pool;
+// С пулом узлов (docs/pool.md) — тот же API; c_allocator — источник плит.
+const Q = if (pooled) @import("fqueue").SyncPooledQueue(i32) else @import("fqueue").SyncQueue(i32);
+
+/// Перед выходом потока, работавшего с очередью, — сбросить его кэш пула
+/// (деструкторов у threadlocal в Zig нет).
+fn flushPool() void {
+    if (pooled) Q.node_pool.flushThreadCache();
+}
 const allocator = std.heap.c_allocator;
 
 const Mode = enum { pool, threads };
@@ -131,6 +139,7 @@ fn worker(shared: *const Shared, share: u64, first: usize, step: usize, out: *u6
     var t = first;
     while (t < tasks) : (t += step) h +%= runTaskOrPanic(shared, share, t);
     out.* = h;
+    flushPool();
 }
 
 fn runThreads(io: std.Io, shared: *const Shared, share: u64, p: usize, elapsed: *i96) !u64 {
@@ -158,6 +167,7 @@ const Snapshot = struct {
 const ReaderResult = struct { snapshots: u64 = 0, elements: u64 = 0 };
 
 fn reader(snapshot: *Snapshot, out: *ReaderResult) void {
+    defer flushPool();
     readSnapshots(snapshot, out) catch |err| std.debug.panic("fqueue: {s}", .{@errorName(err)});
 }
 
