@@ -397,7 +397,11 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             const rear = try newNode(allocator);
             errdefer freeNode(allocator, rear);
             const old_front = if (starting) self.front_stack else self.rot.old_front;
-            var pool = try Pool.init(allocator, stepAllocs(if (starting) .reversing else phase, old_front, self.ok));
+            const allocs = stepAllocs(if (starting) .reversing else phase, old_front, self.ok);
+            // С пулом узлов — резерв без выделения: узлы выделит сам шаг,
+            // после своих освобождений (pool.zig, reserve).
+            if (options.nodes == .pool) try NodePool.reserve(allocator, @intCast(allocs));
+            var pool = try Pool.init(allocator, if (options.nodes == .pool) 0 else allocs);
             defer pool.deinit(allocator);
 
             // После подготовки пула ошибок нет. В atomic режиме инкременты
@@ -407,7 +411,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             self.size += 1;
             self.rear_len += 1;
             if (starting) self.start(options.atomic) catch unreachable;
-            self.step(allocator, &pool, options.atomic) catch unreachable;
+            self.step(allocator, if (options.nodes == .pool) null else &pool, options.atomic) catch unreachable;
             std.debug.assert(pool.count == 0);
         }
 
@@ -425,7 +429,9 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             const starting = phase == .idle and self.rear_len > self.front_len - 1;
             const old_front = if (starting) self.front_stack.?.next else self.rot.old_front;
             const ok = if (phase == .idle) self.front_len - 1 else self.ok - 1;
-            var pool = try Pool.init(allocator, stepAllocs(if (starting) .reversing else phase, old_front, ok));
+            const allocs = stepAllocs(if (starting) .reversing else phase, old_front, ok);
+            if (options.nodes == .pool) try NodePool.reserve(allocator, @intCast(allocs));
+            var pool = try Pool.init(allocator, if (options.nodes == .pool) 0 else allocs);
             defer pool.deinit(allocator);
 
             advanceMode(allocator, &self.front_stack, options.atomic) catch unreachable;
@@ -435,7 +441,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
                 self.ok -= 1;
                 if (phase == .appending and self.ok == 0) self.finish(allocator);
             } else if (starting) self.start(options.atomic) catch unreachable;
-            self.step(allocator, &pool, options.atomic) catch unreachable;
+            self.step(allocator, if (options.nodes == .pool) null else &pool, options.atomic) catch unreachable;
             std.debug.assert(pool.count == 0);
             return value;
         }

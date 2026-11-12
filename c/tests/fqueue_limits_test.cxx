@@ -586,3 +586,56 @@ TEMPLATE_TEST_CASE("the rotation schedule matches Rust and Zig", "[limits]",
   A::destroy(&q);
   REQUIRE(got == std::vector<long>(std::begin(schedule_expected), std::end(schedule_expected)));
 }
+
+TEMPLATE_TEST_CASE("an in-place operation that needs a slab fails without a "
+                   "change, wherever it needs it",
+                   "[limits][pool]", fqueue_pooled, fqueue_pooled_sync) {
+  // Every allocation fails while armed; with the pool only an operation that
+  // needs a new slab allocates — for the new rear or in the reserve of the
+  // rotation step's nodes (fqueue_impl_npool_reserve). Each such failure must
+  // be FQUEUE_NOMEM and leave the queue as it was; disarmed, it succeeds.
+  using A = Api<TestType>;
+  auto trim = [] {
+    if constexpr (std::is_same_v<TestType, fqueue_pooled>)
+      return fqueue_pooled_pool_trim();
+    else
+      return fqueue_pooled_sync_pool_trim();
+  };
+  trim();
+  long start = live;
+  TestType q;
+  A::init(&q);
+  std::deque<int> model;
+  std::vector<TestType> kept; // clones: the in-place ops copy shared nodes,
+                              // so the live set grows across many slabs
+  long failures = 0;
+  int v;
+  // Below TEST_LEN_LIMIT: grow to 30, then push/pop around it, 20000 ops.
+  for (int k = 0; k < 20000; ++k) {
+    if (k % 2 == 0) {
+      kept.emplace_back();
+      REQUIRE(A::clone(&kept.back(), &q) == FQUEUE_OK);
+    }
+    bool push = model.size() < 30 && (model.size() < 20 || k % 3 != 0);
+    arm(0);
+    fqueue_status s = push ? A::push_in_place(&q, k) : A::pop_in_place(&q, &v);
+    disarm();
+    if (injected) {
+      ++failures;
+      REQUIRE(s == FQUEUE_NOMEM);
+      REQUIRE(contents_of(&q) == as_vector(model));
+      s = push ? A::push_in_place(&q, k) : A::pop_in_place(&q, &v);
+    }
+    REQUIRE(s == FQUEUE_OK);
+    if (push) model.push_back(k);
+    else {
+      REQUIRE(v == model.front());
+      model.pop_front();
+    }
+  }
+  A::destroy(&q);
+  for (TestType &c : kept) A::destroy(&c);
+  REQUIRE(failures > 0); // 8 here, in the reserve of the step's nodes
+  trim();
+  REQUIRE(live == start);
+}

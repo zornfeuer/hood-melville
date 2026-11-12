@@ -225,6 +225,70 @@ static void *fqueue_impl_npool_alloc_slow(fqueue_impl_npool        *p,
   return cur;
 }
 
+// Make sure this thread's cache can hand out n more nodes without failing:
+// its list and the uncarved rest of its slab hold at least n, taking a batch
+// or a new slab now if not. An in-place operation calls it before changing the
+// queue — it is the only step that can fail — and then allocates in the
+// rotation step itself, after the step's frees, as the persistent operations
+// and Rust do: allocating the nodes ahead would change their order, and with
+// LIFO reuse the order decides the layout of the lists (docs/pool.md). Frees
+// meanwhile only add nodes, and a spill leaves more than n.
+static bool fqueue_impl_npool_reserve_slow(fqueue_impl_npool        *p,
+                                           fqueue_impl_npool_cache **tl,
+                                           unsigned                  n) {
+  fqueue_impl_npool_cache *c = *tl;
+  if (!c && !(c = fqueue_impl_npool_register(p, tl))) return false;
+  uint32_t nfree = atomic_load_explicit(&c->nfree, memory_order_relaxed);
+  char    *cur   = atomic_load_explicit(&c->cur, memory_order_relaxed);
+  char    *end   = atomic_load_explicit(&c->end, memory_order_relaxed);
+  size_t   left  = cur ? (size_t)(end - cur) / p->node_size : 0;
+  if (FQUEUE_IMPL_LIKELY(nfree + left >= n)) return true;
+  // Short: nfree + left < n <= 2, so the list holds at most one node.
+  if (atomic_load_explicit(&p->batches, memory_order_relaxed)) {
+    fqueue_impl_npool_lock(p);
+    void *head = atomic_load_explicit(&p->batches, memory_order_relaxed);
+    if (head) {
+      atomic_store_explicit(&p->batches, *fqueue_impl_npool_word(head, 1),
+                            memory_order_relaxed);
+      void    *sec = *fqueue_impl_npool_word(head, 0);
+      uint32_t k   = sec ? (uint32_t)(uintptr_t)*fqueue_impl_npool_word(sec, 1) : 1;
+      p->global -= k;
+      p->refills++;
+      fqueue_impl_npool_unlock(p);
+      if (c->free) *fqueue_impl_npool_word(c->free, 0) = head;
+      else c->free = head;
+      atomic_store_explicit(&c->nfree, nfree + k, memory_order_relaxed);
+      if (nfree + k + left >= n) return true;
+    } else {
+      fqueue_impl_npool_unlock(p);
+    }
+  }
+  char *slab = (char *)FQUEUE_MALLOC(FQUEUE_IMPL_SLAB_BYTES);
+  if (!slab) return false;
+  fqueue_impl_npool_lock(p);
+  *fqueue_impl_npool_word(slab, 0) = p->slabs;
+  p->slabs = slab;
+  p->nslabs++;
+  p->slab_allocs++;
+  p->abandoned += left; // the rest of the old slab, counted until trim
+  fqueue_impl_npool_unlock(p);
+  cur = slab + p->node_size;
+  atomic_store_explicit(&c->end, cur + fqueue_impl_npool_per_slab(p) * p->node_size,
+                        memory_order_relaxed);
+  atomic_store_explicit(&c->cur, cur, memory_order_relaxed);
+  return true;
+}
+
+// Usually the list alone holds n nodes.
+static inline bool fqueue_impl_npool_reserve(fqueue_impl_npool        *p,
+                                             fqueue_impl_npool_cache **tl,
+                                             unsigned                  n) {
+  fqueue_impl_npool_cache *c = *tl;
+  if (FQUEUE_IMPL_LIKELY(c && atomic_load_explicit(&c->nfree, memory_order_relaxed) >= n))
+    return true;
+  return fqueue_impl_npool_reserve_slow(p, tl, n);
+}
+
 // A free with no cache yet, or with a cache over FQUEUE_IMPL_CACHE_MAX after
 // the node was added: register, or give FQUEUE_IMPL_BATCH nodes from the top.
 // Without memory for a cache the node goes to the global stack alone.

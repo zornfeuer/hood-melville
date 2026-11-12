@@ -206,6 +206,45 @@ pub fn NodePool(comptime Node: type) type {
             return cur.?;
         }
 
+        /// Убедиться, что кэш потока выдаст ещё n узлов без отказа: в его
+        /// списке и ненарезанном остатке плиты их не меньше n, иначе взять
+        /// пачку или новую плиту сейчас. Операция на месте вызывает это до
+        /// изменения очереди (отказать может только это), а узлы выделяет
+        /// сам шаг ротации — после своих освобождений, как персистентные
+        /// операции и Rust: выделение заранее меняло бы порядок узлов, а при
+        /// LIFO-переиспользовании порядок задаёт раскладку списков.
+        pub inline fn reserve(allocator: Allocator, n: u32) Allocator.Error!void {
+            if (cache) |c| {
+                if (c.nfree.load(.monotonic) >= n) return;
+            }
+            return reserveSlow(allocator, n);
+        }
+
+        noinline fn reserveSlow(allocator: Allocator, n: u32) Allocator.Error!void {
+            const c = cache orelse register(allocator) orelse return error.OutOfMemory;
+            const nfree = c.nfree.load(.monotonic);
+            const left: u32 = @intCast(uncarved(c));
+            if (nfree + left >= n) return;
+            // Не хватает: nfree + left < n <= 2, в списке не больше одного узла.
+            if (batches.load(.monotonic) != null) {
+                acquire();
+                if (popBatch()) |b| {
+                    counters.refills += 1;
+                    release();
+                    if (c.free.load(.monotonic)) |head| word(head, 0).* = @ptrCast(b.head) else c.free.store(b.head, .monotonic);
+                    c.nfree.store(nfree + b.n, .monotonic);
+                    if (nfree + b.n + left >= n) return;
+                } else release();
+            }
+            acquire();
+            defer release();
+            const slab = try newSlab(allocator);
+            abandoned += left; // остаток прежней плиты — до trim
+            const cur = slab + stride;
+            c.end.store(cur + per_slab * stride, .monotonic);
+            c.cur.store(cur, .monotonic);
+        }
+
         pub inline fn free(allocator: Allocator, node: *Node) void {
             const p: [*]u8 = @ptrCast(node);
             if (cache) |c| {

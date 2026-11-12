@@ -737,6 +737,13 @@ static unsigned FQUEUE_IMPL_P(step_allocs)(const FQUEUE_IMPL_P(rotation) *r) {
 }
 
 static bool FQUEUE_IMPL_P(pool_fill)(FQUEUE_IMPL_P(pool) *p, unsigned n) {
+#ifdef FQUEUE_NODE_POOL
+  // The node pool reserves without allocating: the step allocates the nodes
+  // itself, after its frees (fqueue_impl_npool_reserve).
+  p->n = 0;
+  return fqueue_impl_npool_reserve(&FQUEUE_IMPL_P(node_pool),
+                                   &FQUEUE_IMPL_P(node_pool_cache), n);
+#else
   for (p->n = 0; p->n < n; p->n++) {
     p->nodes[p->n] = FQUEUE_IMPL_NODE_NEW();
     if (!p->nodes[p->n]) {
@@ -746,6 +753,7 @@ static bool FQUEUE_IMPL_P(pool_fill)(FQUEUE_IMPL_P(pool) *p, unsigned n) {
     }
   }
   return true;
+#endif
 }
 
 // True if a reference to n's successor could take a count above REFS_LIMIT.
@@ -829,7 +837,11 @@ fqueue_status FQUEUE_IMPL_N(push_in_place)(FQUEUE_NAME *q, FQUEUE_T value) {
   q->rear_len++;
   q->size++;
   if (start) overflow |= FQUEUE_IMPL_P(start_rotation)(q);
+  #ifdef FQUEUE_NODE_POOL
+  (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, NULL); // reserved
+#else
   (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, &pool);
+#endif
 #ifndef FQUEUE_ATOMIC
   assert(!overflow); // with FQUEUE_ATOMIC the limit is soft (see Threads)
 #endif
@@ -877,7 +889,11 @@ fqueue_status FQUEUE_IMPL_N(pop_in_place)(FQUEUE_NAME *q, FQUEUE_T *value) {
   } else if (start) {
     overflow |= FQUEUE_IMPL_P(start_rotation)(q);
   }
+  #ifdef FQUEUE_NODE_POOL
+  (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, NULL); // reserved
+#else
   (void)FQUEUE_IMPL_P(rotate_step_from)(q, &overflow, &pool);
+#endif
 #ifndef FQUEUE_ATOMIC
   assert(!overflow); // with FQUEUE_ATOMIC the limit is soft (see Threads)
 #endif

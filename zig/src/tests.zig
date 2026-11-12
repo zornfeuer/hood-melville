@@ -467,3 +467,44 @@ test "расписание ротации совпадает с C и Rust" {
         try std.testing.expectEqualSlices(usize, &schedule_expected, &got);
     }
 }
+
+test "пул узлов: операция на месте, которой нужна плита, отказывает без изменений" {
+    // Отказ взведён на каждой операции; с пулом выделяет только операция,
+    // которой нужна новая плита, — под новый тыл или в резерве узлов шага
+    // (pool.zig, reserve). Клоны держат узлы живыми, и живое множество
+    // растёт через много плит.
+    const Q = root.QueueWithOptions(i32, .{ .nodes = .pool, .refs_limit = std.math.maxInt(u32) - 2 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const a = failing.allocator();
+    var q = Q.init();
+    var kept: std.ArrayList(Q) = .empty;
+    defer kept.deinit(std.testing.allocator);
+    var model: std.ArrayList(i32) = .empty;
+    defer model.deinit(std.testing.allocator);
+    var failures: usize = 0;
+    for (0..20000) |k| {
+        if (k % 2 == 0) try kept.append(std.testing.allocator, try q.clone());
+        const push = model.items.len < 30 and (model.items.len < 20 or k % 3 != 0);
+        failing.fail_index = failing.alloc_index;
+        const r = if (push) q.pushInPlace(a, @intCast(k)) else if (q.popInPlace(a)) |v| blk: {
+            try std.testing.expectEqual(model.items[0], v.?);
+            break :blk {};
+        } else |e| e;
+        failing.fail_index = std.math.maxInt(usize);
+        r catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+            // Содержимое прежнее (обход — тем же источником плит).
+            var it = try q.iterator();
+            defer it.deinit(a);
+            for (model.items) |m| try std.testing.expectEqual(m, (try it.next(a)).?);
+            try std.testing.expectEqual(@as(?i32, null), try it.next(a));
+            if (push) try q.pushInPlace(a, @intCast(k)) else try std.testing.expectEqual(model.items[0], (try q.popInPlace(a)).?);
+        };
+        if (push) try model.append(std.testing.allocator, @intCast(k)) else _ = model.orderedRemove(0);
+    }
+    q.deinit(a);
+    for (kept.items) |*c| c.deinit(a);
+    try std.testing.expect(failures > 0);
+    try expectPoolEmptied(Q, a);
+}
