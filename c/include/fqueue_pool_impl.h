@@ -32,8 +32,8 @@
 #include "fqueue_common.h"
 
 #define FQUEUE_IMPL_SLAB_BYTES ((size_t)65536)
-#define FQUEUE_IMPL_CACHE_MAX  512u
-#define FQUEUE_IMPL_BATCH      256u
+#define FQUEUE_IMPL_CACHE_MAX  4096u
+#define FQUEUE_IMPL_BATCH      2048u
 
 #if defined(__GNUC__)
 #define FQUEUE_IMPL_LIKELY(x)   __builtin_expect(!!(x), 1)
@@ -45,13 +45,20 @@
 
 typedef struct fqueue_impl_npool fqueue_impl_npool;
 
+// A cache line of its own (128 bytes on Apple M, 64 elsewhere): the caches of
+// different threads are written on every operation, and two of them in one
+// line would make it bounce between cores (false sharing).
+#define FQUEUE_IMPL_CACHE_LINE 128
+
 typedef struct fqueue_impl_npool_cache {
+  _Alignas(FQUEUE_IMPL_CACHE_LINE)
   void                          *free;  // LIFO list of free nodes
   _Atomic uint32_t               nfree; // its length (read by stats)
   _Atomic(char *)                cur;   // carving: next node of the slab
   _Atomic(char *)                end;   // end of the slab
   fqueue_impl_npool              *pool;
   struct fqueue_impl_npool_cache *next;  // registry of the pool's caches
+  void                          *raw;   // FQUEUE_MALLOC block holding it
 } fqueue_impl_npool_cache;
 
 struct fqueue_impl_npool {
@@ -136,22 +143,27 @@ static void fqueue_impl_npool_thread_exit(void *arg) {
       break;
     }
   fqueue_impl_npool_unlock(p);
-  FQUEUE_FREE(c);
+  FQUEUE_FREE(c->raw);
 }
 
 // The cache of this thread, created and registered on first use; NULL if it
 // cannot be allocated.
 static fqueue_impl_npool_cache *
 fqueue_impl_npool_register(fqueue_impl_npool *p, fqueue_impl_npool_cache **tl) {
-  fqueue_impl_npool_cache *c = (fqueue_impl_npool_cache *)FQUEUE_MALLOC(sizeof *c);
-  if (!c) return NULL;
+  // FQUEUE_MALLOC promises no more than max_align_t: align by hand.
+  char *raw = (char *)FQUEUE_MALLOC(sizeof(fqueue_impl_npool_cache) + FQUEUE_IMPL_CACHE_LINE);
+  if (!raw) return NULL;
+  fqueue_impl_npool_cache *c =
+      (fqueue_impl_npool_cache *)(raw + FQUEUE_IMPL_CACHE_LINE -
+                                  (uintptr_t)raw % FQUEUE_IMPL_CACHE_LINE);
   *c      = (fqueue_impl_npool_cache){0};
   c->pool = p;
+  c->raw  = raw;
   fqueue_impl_npool_lock(p);
   if (!p->key_ready) { // pthread_once takes no argument, so under the lock
     if (pthread_key_create(&p->key, fqueue_impl_npool_thread_exit) != 0) {
       fqueue_impl_npool_unlock(p);
-      FQUEUE_FREE(c);
+      FQUEUE_FREE(raw);
       return NULL;
     }
     p->key_ready = true;

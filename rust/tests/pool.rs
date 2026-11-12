@@ -177,7 +177,8 @@ fn long_cache_spills_batches_other_threads_take() {
     let _g = serial();
     pool::trim();
     let before = pool::stats();
-    let n = if cfg!(miri) { 1_000 } else { 10_000 };
+    // Больше предела кэша потока (4096), чтобы освобождение переливалось.
+    let n = if cfg!(miri) { 6_000 } else { 10_000 };
     drop((0..n).collect::<PooledQueue<u32>>());
     let s = pool::stats();
     assert!(s.spills > before.spills);

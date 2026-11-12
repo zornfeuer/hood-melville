@@ -24,8 +24,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub const slab_bytes = 65536;
-pub const cache_max = 512;
-pub const batch = 256;
+pub const cache_max = 4096;
+pub const batch = 2048;
 
 /// Статистика пула; под конкуренцией — приблизительная.
 pub const Stats = struct {
@@ -60,8 +60,11 @@ pub fn NodePool(comptime Node: type) type {
     return struct {
         const Word = ?*anyopaque;
 
+        // Своя строка кэша (128 байт на Apple M): кэши разных потоков
+        // меняются на каждой операции, и два в одной строке гоняли бы её
+        // между ядрами.
         const Cache = struct {
-            free: std.atomic.Value(?[*]u8) = .init(null), // список, LIFO
+            free: std.atomic.Value(?[*]u8) align(128) = .init(null), // список, LIFO
             nfree: std.atomic.Value(u32) = .init(0),
             cur: std.atomic.Value(?[*]u8) = .init(null), // нарезка
             end: std.atomic.Value(?[*]u8) = .init(null),

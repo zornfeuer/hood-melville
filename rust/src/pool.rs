@@ -46,8 +46,8 @@ use crate::refcount::{RefCount, ThreadSafe, sealed};
 use crate::storage::NodeStorage;
 
 const SLAB_BYTES: usize = 65536;
-const CACHE_MAX: u32 = 512;
-const BATCH: u32 = 256;
+const CACHE_MAX: u32 = 4096;
+const BATCH: u32 = 2048;
 /// Выравнивание плиты; узлы в ней — по `SLAB_ALIGN` и размеру узла.
 const SLAB_ALIGN: usize = 16;
 const MAX_NODE: usize = 256;
@@ -294,6 +294,9 @@ unsafe fn word(node: *mut u8, i: usize) -> *mut *mut u8 {
 /// обращения, и владельца тоже, — через сырой указатель по отдельным полям:
 /// ссылка на всю структуру (и `&mut` деструктора thread-local) считалась бы
 /// доступом и к полям, которые в это время меняет другой поток.
+/// Своя строка кэша (128 байт на Apple M): кэши разных потоков меняются на
+/// каждой операции, и два в одной строке гоняли бы её между ядрами.
+#[repr(align(128))]
 struct Cache {
     free: AtomicPtr<u8>, // список свободных, LIFO
     nfree: AtomicU32,
