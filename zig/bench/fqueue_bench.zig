@@ -139,13 +139,23 @@ fn last(versions: *const std.ArrayList(Q)) *const Q {
     return &versions.items[versions.items.len - 1];
 }
 
+/// Место под ещё одну версию. Рост — как у массива версий в C (1024, затем
+/// удвоение) и у Vec в Rust, а не по умолчанию ArrayList (в 1.5 раза): иначе
+/// на миллионах версий по 64 байта нагрузка Zig чаще перевыделяет и копирует
+/// массив — работа обвязки, а не очереди.
+fn reserve(versions: *std.ArrayList(Q)) !void {
+    if (versions.items.len < versions.capacity) return;
+    const cap = if (versions.capacity == 0) 1024 else versions.capacity * 2;
+    try versions.ensureTotalCapacityPrecise(allocator, cap);
+}
+
 fn keepPush(versions: *std.ArrayList(Q), value: i32) !void {
-    try versions.ensureUnusedCapacity(allocator, 1);
+    try reserve(versions);
     versions.appendAssumeCapacity(try last(versions).push(allocator, value));
 }
 
 fn keepPop(versions: *std.ArrayList(Q)) !void {
-    try versions.ensureUnusedCapacity(allocator, 1);
+    try reserve(versions);
     versions.appendAssumeCapacity((try last(versions).pop(allocator)).?);
 }
 
@@ -198,7 +208,7 @@ fn runBranching(n: i32, ph: *Phases) !u64 {
         const slot = (x >> 3) % heads.len;
         const idx = if (x & 63 == 0) (x >> 12) % versions.items.len else heads[slot];
         // Резервирование может переместить массив: родитель берётся после него.
-        try versions.ensureUnusedCapacity(allocator, 1);
+        try reserve(&versions);
         const parent = &versions.items[idx];
         const child = if (parent.front()) |value| blk: {
             h = mix(h, value);

@@ -268,7 +268,7 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
             self.ok = 0;
         }
 
-        fn step(self: *Self, allocator: Allocator, pool: ?*Pool, comptime unchecked: bool) Error!void {
+        inline fn step(self: *Self, allocator: Allocator, pool: ?*Pool, comptime unchecked: bool) Error!void {
             const s = &self.rot;
             switch (s.phase()) {
                 .idle => {},
