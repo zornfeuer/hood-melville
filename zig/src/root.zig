@@ -21,7 +21,7 @@ pub fn SyncQueue(comptime T: type) type {
 }
 
 /// Очередь с узлами из пула (`docs/pool.md`): тот же API, узлы берутся из
-/// пула этого типа (плиты по 64 КиБ у переданного аллокатора, кэш у каждого
+/// пула этого типа (плиты по 16 КиБ у переданного аллокатора, кэш у каждого
 /// потока) и возвращаются туда при обнулении счётчика. Аллокатор операций —
 /// источник плит: во все операции передавайте один и тот же. Пул держит
 /// память на пике живого множества до `node_pool.trim`; перед выходом потока —
@@ -78,7 +78,10 @@ pub fn QueueWithOptions(comptime T: type, comptime options: Options) type {
         }
 
         inline fn freeNode(allocator: Allocator, n: *Node) void {
-            if (options.nodes == .pool) NodePool.free(allocator, n) else allocator.destroy(n);
+            if (options.nodes != .pool) return allocator.destroy(n);
+            // С атомарными счётчиками — вызовом: встроенное освобождение
+            // пула замедляет их операции (pool.zig, freeOutlined).
+            if (options.atomic) NodePool.freeOutlined(allocator, n) else NodePool.free(allocator, n);
         }
         // Фаза ротации кодируется самими указателями, без тега (как ниша в
         // Rust): разворот идёт, пока непуст old_rear; дописывание — old_rear

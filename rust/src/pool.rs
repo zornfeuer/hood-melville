@@ -1,13 +1,13 @@
-//! Пул узлов — альтернативный аллокатор узлов (`docs/pool.md`; C и Zig
-//! следуют тому же алгоритму с теми же константами).
+//! Пул узлов — альтернативный аллокатор узлов (`docs/pool.md`).
 //!
 //! [`NodePool`] реализует [`Allocator`]: очередь с пулом — `Queue<T, R,
 //! NodePool>`, для краткости [`PooledQueue`](crate::PooledQueue) и
 //! [`SyncPooledQueue`](crate::SyncPooledQueue). Семантика, счётчики ссылок и
 //! освобождение узла при обнулении счётчика — те же, но узел уходит в пул, а
-//! не в глобальный аллокатор. Память берётся плитами по 65 536 байт у
-//! глобального аллокатора и не возвращается, пока в пуле есть живой узел:
-//! пул держит пик живого множества до [`trim`].
+//! не в глобальный аллокатор. Память берётся плитами по 16 384 байта,
+//! выровненными по своему размеру, у глобального аллокатора и не
+//! возвращается, пока в пуле есть живой узел: пул держит пик живого множества
+//! до [`trim`].
 //!
 //! Пулы — по классам размера (16, 24, …, 256 байт): обобщённых статических
 //! переменных в Rust нет, поэтому очереди с одинаковым размером узла
@@ -17,19 +17,30 @@
 //!
 //! Устройство: у каждого потока на каждый класс — кэш (список свободных
 //! узлов, LIFO, и плита, которую он нарезает) в куче за указателем из
-//! `thread_local!`; кэш длиннее
-//! `CACHE_MAX` отдаёт `BATCH` узлов в общий стек пачек под спин-блокировкой,
-//! пустой — забирает пачку оттуда до нарезки новой плиты. При выходе потока
-//! кэш уходит в общий стек (`Drop`). Свободный узел хранит ссылки пула в
-//! первых двух словах: слово 0 — следующий узел списка или пачки; в голове
-//! пачки слово 1 — следующая пачка; во втором узле пачки слово 1 — число узлов
-//! в ней (в пачке из одного узла второго нет).
+//! `thread_local!`. Кэш владеет плитами, которые нарезал: заголовок плиты
+//! указывает на него, а плита узла — его адрес, округлённый вниз до размера
+//! плиты. Узел, освобождённый владельцем, идёт в его список; освобождённый
+//! другим потоком — в стек освобождений владельца (без блокировки: кладёт
+//! любой поток, владелец забирает целиком, когда его список пуст). Узлы не
+//! уходят от владельца, и строки кэша с узлами не переходят между потоками
+//! через пул. Чужие узлы поток копит пачкой до `REMOTE_BATCH` для одного
+//! владельца и отдаёт одной атомарной операцией. При выходе потока его кэш
+//! со всем, что в нём, становится сиротой, и его забирает следующий поток,
+//! которому нужен кэш; кэши освобождаются только вместе с пулом — на них
+//! указывают заголовки плит.
+//!
+//! Свободный узел хранит ссылку пула в слове 0 (следующий узел списка, пачки
+//! или стека освобождений). Заголовок плиты — её первый узел: слово 0 —
+//! следующая плита пула, слово 1 — кэш-владелец.
 //!
 //! Второй модуль крейта с `unsafe` (после `node`). Инварианты:
 //! - узел, выданный `alloc`, не выдаётся снова до `free`;
 //! - плита освобождается только в [`trim`], когда ни одного живого узла нет;
-//! - кэш потока читают другие потоки только через атомарные поля (`stats`) и
-//!   пишут только в `trim`, который требует, чтобы пулом никто не пользовался.
+//!   кэш — никогда (на него указывают заголовки плит);
+//! - владелец плиты не меняется, пока плита жива;
+//! - поля кэша, кроме стека освобождений, пишет только поток, которому кэш
+//!   принадлежит, или [`trim`] в спокойном состоянии; другие потоки читают их
+//!   только через атомарные поля (`stats`).
 
 #![allow(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -40,18 +51,20 @@ use std::alloc::{
 use std::cell::{Cell, UnsafeCell};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicU32, Ordering::Acquire, Ordering::Relaxed, Ordering::Release,
+    AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering::Acquire, Ordering::Relaxed,
+    Ordering::Release,
 };
 
-const SLAB_BYTES: usize = 65536;
-const CACHE_MAX: u32 = 4096;
-const BATCH: u32 = 2048;
-/// Выравнивание плиты; узлы в ней — по `SLAB_ALIGN` и размеру узла.
-const SLAB_ALIGN: usize = 16;
+/// Страница Apple M: заголовок плиты узла — на странице узла, и проверка
+/// владельца при освобождении не стоит лишней записи TLB (`docs/pool.md`).
+const SLAB_BYTES: usize = 16384;
+/// Чужих узлов в пачке, которую поток отдаёт владельцу одной операцией.
+const REMOTE_BATCH: u32 = 64;
 const MAX_NODE: usize = 256;
 const CLASSES: usize = MAX_NODE / 8 + 1;
 
-const SLAB_LAYOUT: Layout = match Layout::from_size_align(SLAB_BYTES, SLAB_ALIGN) {
+/// Плита выровнена по своему размеру: по адресу узла находится заголовок.
+const SLAB_LAYOUT: Layout = match Layout::from_size_align(SLAB_BYTES, SLAB_BYTES) {
     Ok(l) => l,
     Err(_) => panic!("размер плиты"),
 };
@@ -94,15 +107,15 @@ unsafe impl Allocator for NodePool {
 /// Класс блока: его размер в пуле / 8, или `None` — блок не из пула.
 ///
 /// Узлы класса нарезаются с шагом в размер класса от начала плиты (оно
-/// выровнено по `SLAB_ALIGN`), поэтому при выравнивании 16 размер класса
-/// кратен 16. Свободный узел хранит два слова — отсюда минимум 16 байт.
-/// Раскладка узла известна при компиляции, и после встраивания класс —
-/// константа. Любой размер, допустимый для `deallocate` блока (между
-/// запрошенным и выданным), попадает в тот же класс.
+/// выровнено по размеру плиты), поэтому при выравнивании 16 размер класса
+/// кратен 16. Свободный узел хранит два слова (заголовок плиты — тоже) —
+/// отсюда минимум 16 байт. Раскладка узла известна при компиляции, и после
+/// встраивания класс — константа. Любой размер, допустимый для `deallocate`
+/// блока (между запрошенным и выданным), попадает в тот же класс.
 #[inline]
 const fn class_of(layout: Layout) -> Option<usize> {
     let (size, align) = (layout.size(), layout.align());
-    if size == 0 || size > MAX_NODE || align > SLAB_ALIGN {
+    if size == 0 || size > MAX_NODE || align > 16 {
         return None;
     }
     let size = size.next_multiple_of(if align > 8 { 16 } else { 8 });
@@ -113,137 +126,120 @@ const fn class_of(layout: Layout) -> Option<usize> {
 // Пул класса и кэш потока.
 
 struct Inner {
-    global: usize,  // узлов в пачках
     slabs: *mut u8, // все плиты, через слово 0
     nslabs: usize,
-    abandoned: usize, // ненарезанные узлы плит завершившихся потоков
-    registry: *const Cache,
+    registry: *const Cache, // все кэши, сироты тоже
+    orphans: *const Cache,  // кэши завершившихся потоков
+    shared: *const Cache,   // кэш потоков без своего, под `shared_lock`
     slab_allocs: u64,
     slab_frees: u64,
-    spills: u64,
-    refills: u64,
+    adoptions: u64,
 }
 
 struct ClassPool {
     lock: AtomicBool,
-    batches: AtomicPtr<u8>, // стек пачек (подсматривается без блокировки)
+    shared_lock: AtomicBool,
     inner: UnsafeCell<Inner>,
 }
 
-// SAFETY: `inner` меняется только под `lock`; `batches` атомарный.
+// SAFETY: `inner` меняется только под `lock`, общий кэш — под `shared_lock`.
 unsafe impl Sync for ClassPool {}
 
 impl ClassPool {
     const fn new() -> Self {
         Self {
             lock: AtomicBool::new(false),
-            batches: AtomicPtr::new(ptr::null_mut()),
+            shared_lock: AtomicBool::new(false),
             inner: UnsafeCell::new(Inner {
-                global: 0,
                 slabs: ptr::null_mut(),
                 nslabs: 0,
-                abandoned: 0,
                 registry: ptr::null(),
+                orphans: ptr::null(),
+                shared: ptr::null(),
                 slab_allocs: 0,
                 slab_frees: 0,
-                spills: 0,
-                refills: 0,
+                adoptions: 0,
             }),
         }
     }
 
-    /// Спин-блокировка test-and-test-and-set с уступкой процессора
-    /// (одинакова в C, Rust и Zig, `docs/pool.md`).
     fn lock(&self) -> Guard<'_> {
-        while self.lock.swap(true, Acquire) {
-            while self.lock.load(Relaxed) {
-                std::thread::yield_now();
-            }
+        Guard {
+            pool: self,
+            _spin: Spin::lock(&self.lock),
         }
-        Guard(self)
     }
 }
 
-struct Guard<'a>(&'a ClassPool);
+/// Спин-блокировка test-and-test-and-set с уступкой процессора
+/// (как в C и Zig, `docs/pool.md`).
+struct Spin<'a>(&'a AtomicBool);
+
+impl<'a> Spin<'a> {
+    fn lock(flag: &'a AtomicBool) -> Self {
+        while flag.swap(true, Acquire) {
+            while flag.load(Relaxed) {
+                std::thread::yield_now();
+            }
+        }
+        Spin(flag)
+    }
+}
+
+impl Drop for Spin<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Release);
+    }
+}
+
+/// Блокировка пула класса: отпускается вместе с охранником.
+struct Guard<'a> {
+    pool: &'a ClassPool,
+    _spin: Spin<'a>,
+}
 
 impl Guard<'_> {
     fn inner(&mut self) -> &mut Inner {
         // SAFETY: блокировка наша, других ссылок на `inner` нет.
-        unsafe { self.0.inner.as_mut_unchecked() }
+        unsafe { self.pool.inner.as_mut_unchecked() }
     }
 
-    /// Положить пачку из `n` узлов (связаны словом 0, у последнего — null).
-    fn push_batch(&mut self, head: *mut u8, n: u32) {
-        // SAFETY: узлы пачки свободны и принадлежат нам; размер ≥ 2 слов.
-        unsafe {
-            let second = *word(head, 0);
-            if !second.is_null() {
-                *word(second, 1) = ptr::without_provenance_mut(n as usize);
-            }
-            *word(head, 1) = self.0.batches.load(Relaxed);
-        }
-        self.0.batches.store(head, Relaxed);
-        self.inner().global += n as usize;
-    }
-
-    /// Снять пачку: голова и число узлов.
-    fn pop_batch(&mut self) -> Option<(*mut u8, u32)> {
-        let head = self.0.batches.load(Relaxed);
-        if head.is_null() {
-            return None;
-        }
-        // SAFETY: пачки в стеке — свободные узлы пула.
-        let (next, n) = unsafe {
-            let second = *word(head, 0);
-            // Записано в `push_batch` из `u32`.
-            #[allow(clippy::cast_possible_truncation)]
-            let n = if second.is_null() {
-                1
-            } else {
-                (*word(second, 1)).addr() as u32
-            };
-            (*word(head, 1), n)
-        };
-        self.0.batches.store(next, Relaxed);
-        self.inner().global -= n as usize;
-        Some((head, n))
-    }
-
-    fn new_slab(&mut self) -> *mut u8 {
+    /// Новая плита во владении `c`; заголовок записан.
+    fn new_slab(&mut self, c: *const Cache) -> *mut u8 {
         // SAFETY: размер плиты ненулевой.
         let slab = unsafe { global_alloc(SLAB_LAYOUT) };
         if slab.is_null() {
             handle_alloc_error(SLAB_LAYOUT);
         }
         let inner = self.inner();
-        // SAFETY: в плите есть место под заголовок.
-        unsafe { *word(slab, 0) = inner.slabs };
+        // SAFETY: в плите есть место под заголовок из двух слов.
+        unsafe {
+            *word(slab, 0) = inner.slabs;
+            *word(slab, 1) = c.cast_mut().cast();
+        }
         inner.slabs = slab;
         inner.nslabs += 1;
         inner.slab_allocs += 1;
         slab
     }
 
-    /// Свободные узлы: кэши (список и ненарезанное), общий стек, брошенные.
+    /// Свободные узлы: кэши (список, пачка, стек освобождений, ненарезанное).
     fn free_nodes(&mut self, size: usize) -> usize {
         let inner = self.inner();
-        let mut n = inner.global + inner.abandoned;
+        let mut n = 0;
         let mut c = inner.registry;
         while !c.is_null() {
-            // SAFETY: кэш в реестре — живой кэш потока (снимается при выходе);
-            // ссылки — только на отдельные поля (см. `Cache`).
+            // SAFETY: кэши не освобождаются; ссылки — только на отдельные
+            // атомарные поля, `next` — под блокировкой (см. `Cache`).
             unsafe {
-                n += (*c).nfree.load(Relaxed) as usize + uncarved(&(*c).cur, &(*c).end, size);
+                n += (*c).nfree.load(Relaxed) as usize
+                    + (*c).nout.load(Relaxed) as usize
+                    + remote_len(c)
+                    + uncarved(&(*c).cur, &(*c).end, size);
                 c = (*c).next.get();
             }
         }
         n
-    }
-}
-
-impl Drop for Guard<'_> {
-    fn drop(&mut self) {
-        self.0.lock.store(false, Release);
     }
 }
 
@@ -257,23 +253,40 @@ fn uncarved(cur: &AtomicPtr<u8>, end: &AtomicPtr<u8>, size: usize) -> usize {
     }
 }
 
-/// Слово `i` свободного узла.
+/// Слово `i` свободного узла (или заголовка плиты).
 ///
 /// # Safety
 /// `node` — узел пула размером не меньше `i + 1` слов.
-// Плиты выровнены на 16, размеры классов кратны 8 (`class_of`): узлы — на 8.
+// Плиты выровнены по своему размеру, размеры классов кратны 8 (`class_of`):
+// узлы — на 8.
 #[allow(clippy::cast_ptr_alignment)]
 unsafe fn word(node: *mut u8, i: usize) -> *mut *mut u8 {
     // SAFETY: см. контракт.
     unsafe { node.cast::<*mut u8>().add(i) }
 }
 
+/// Кэш-владелец плиты узла.
+///
+/// # Safety
+/// `node` — узел живой плиты пула.
+#[inline]
+unsafe fn owner(node: *mut u8) -> *const Cache {
+    let slab = node.map_addr(|a| a & !(SLAB_BYTES - 1));
+    // SAFETY: см. контракт; слово 1 заголовка записано в `new_slab` и не
+    // меняется, пока плита жива.
+    unsafe { (*word(slab, 1)).cast_const().cast() }
+}
+
+/// Стек освобождений кэша — своя строка: его пишут другие потоки.
+#[repr(align(128))]
+struct Remote(AtomicPtr<u8>);
+
 /// Кэш потока на один класс — в куче, как в C: `thread_local!` хранит только
-/// указатели на кэши. Кэш читают и пишут разные потоки (владелец; `stats`,
-/// `trim` и выход других потоков — реестр под блокировкой), поэтому все
-/// обращения, и владельца тоже, — через сырой указатель по отдельным полям:
-/// ссылка на всю структуру (и `&mut` деструктора thread-local) считалась бы
-/// доступом и к полям, которые в это время меняет другой поток.
+/// указатели на кэши. Кэш читают и пишут разные потоки (владелец; чужие
+/// освобождения; `stats`, `trim` и выход потоков — под блокировкой), поэтому
+/// все обращения, и владельца тоже, — через сырой указатель по отдельным
+/// полям: ссылка на всю структуру считалась бы доступом и к полям, которые в
+/// это время меняет другой поток.
 /// Своя строка кэша (128 байт на Apple M): кэши разных потоков меняются на
 /// каждой операции, и два в одной строке гоняли бы её между ядрами.
 #[repr(align(128))]
@@ -282,39 +295,119 @@ struct Cache {
     nfree: AtomicU32,
     cur: AtomicPtr<u8>, // нарезка: следующий узел плиты
     end: AtomicPtr<u8>,
-    next: Cell<*const Cache>, // реестр класса; только под блокировкой пула
+    // Чужие узлы, освобождённые здесь, — пачкой одному владельцу.
+    out_owner: Cell<*const Cache>,
+    out_head: Cell<*mut u8>,
+    out_tail: Cell<*mut u8>,
+    nout: AtomicU32,
+    collects: AtomicU64,        // сколько раз забран стек освобождений
+    next: Cell<*const Cache>,   // реестр класса; только под блокировкой пула
+    orphan: Cell<*const Cache>, // следующая сирота; только под блокировкой
+    remote: Remote,             // узлы плит кэша, освобождённые другими потоками
 }
 
-/// Узлов в ненарезанной части плиты кэша.
-///
-/// # Safety
-/// `c` — живой кэш (зарегистрированный или свой).
-unsafe fn cache_uncarved(c: *const Cache, size: usize) -> usize {
-    // SAFETY: см. контракт; ссылки — на отдельные атомарные поля.
-    unsafe { uncarved(&(*c).cur, &(*c).end, size) }
+impl Cache {
+    fn new() -> *const Cache {
+        Box::into_raw(Box::new(Cache {
+            free: AtomicPtr::new(ptr::null_mut()),
+            nfree: AtomicU32::new(0),
+            cur: AtomicPtr::new(ptr::null_mut()),
+            end: AtomicPtr::new(ptr::null_mut()),
+            out_owner: Cell::new(ptr::null()),
+            out_head: Cell::new(ptr::null_mut()),
+            out_tail: Cell::new(ptr::null_mut()),
+            nout: AtomicU32::new(0),
+            collects: AtomicU64::new(0),
+            next: Cell::new(ptr::null()),
+            orphan: Cell::new(ptr::null()),
+            remote: Remote(AtomicPtr::new(ptr::null_mut())),
+        }))
+    }
 }
 
-/// Весь список кэша — в общий стек пачками.
+/// Положить цепочку `head..=last` (связана словом 0) в стек освобождений
+/// владельца.
 ///
 /// # Safety
-/// `c` — живой кэш, его список не меняется никем другим (свой поток или
-/// спокойное состояние); блокировка пула у вызывающего.
-unsafe fn cache_flush(c: *const Cache, g: &mut Guard<'_>) {
-    // SAFETY: см. контракт; узлы списка — свободные узлы пула, связаны словом 0.
-    unsafe {
-        let mut node = (*c).free.load(Relaxed);
-        while !node.is_null() {
-            let (head, mut last, mut n) = (node, node, 1);
-            while n < BATCH && !(*word(last, 0)).is_null() {
-                last = *word(last, 0);
-                n += 1;
-            }
-            node = *word(last, 0);
-            *word(last, 0) = ptr::null_mut();
-            g.push_batch(head, n);
+/// `owner` — кэш пула; узлы цепочки свободны, принадлежат плитам `owner` и
+/// больше никем не используются.
+unsafe fn push_remote(owner: *const Cache, head: *mut u8, last: *mut u8) {
+    // SAFETY: см. контракт; кэши не освобождаются.
+    let remote = unsafe { &(*owner).remote.0 };
+    let mut top = remote.load(Relaxed);
+    loop {
+        // SAFETY: `last` — свободный узел, слово 0 — под стек.
+        unsafe { *word(last, 0) = top };
+        match remote.compare_exchange_weak(top, head, Release, Relaxed) {
+            Ok(_) => return,
+            Err(t) => top = t,
         }
-        (*c).free.store(ptr::null_mut(), Relaxed);
-        (*c).nfree.store(0, Relaxed);
+    }
+}
+
+/// Отдать накопленную пачку чужих узлов владельцу, если она есть.
+///
+/// # Safety
+/// `c` — свой живой кэш (или кэш, с которым больше никто не работает).
+unsafe fn flush_out(c: *const Cache) {
+    // SAFETY: см. контракт; поля пачки пишет только поток кэша.
+    unsafe {
+        let head = (*c).out_head.get();
+        if head.is_null() {
+            return;
+        }
+        push_remote((*c).out_owner.get(), head, (*c).out_tail.get());
+        (*c).out_head.set(ptr::null_mut());
+        (*c).out_tail.set(ptr::null_mut());
+        (*c).nout.store(0, Relaxed);
+    }
+}
+
+/// Забрать стек освобождений кэша в начало его списка; `false`, если он пуст.
+///
+/// # Safety
+/// `c` — свой живой кэш (или общий под блокировкой).
+unsafe fn collect(c: *const Cache) -> bool {
+    // SAFETY: см. контракт; узлы стека освобождены другими потоками и
+    // переданы нам `Release`-записью, которую видит `Acquire`.
+    unsafe {
+        let remote = &(*c).remote.0;
+        if remote.load(Relaxed).is_null() {
+            return false;
+        }
+        let head = remote.swap(ptr::null_mut(), Acquire);
+        let (mut last, mut n) = (head, 1);
+        while !(*word(last, 0)).is_null() {
+            last = *word(last, 0);
+            n += 1;
+        }
+        *word(last, 0) = (*c).free.load(Relaxed);
+        (*c).free.store(head, Relaxed);
+        (*c).nfree.store((*c).nfree.load(Relaxed) + n, Relaxed);
+        (*c).collects
+            .store((*c).collects.load(Relaxed) + 1, Relaxed);
+    }
+    true
+}
+
+/// Длина стека освобождений кэша: забрать целиком, посчитать, вернуть.
+///
+/// # Safety
+/// `c` — кэш пула.
+unsafe fn remote_len(c: *const Cache) -> usize {
+    // SAFETY: см. контракт; забранная цепочка на время подсчёта наша.
+    unsafe {
+        let head = (*c).remote.0.swap(ptr::null_mut(), Acquire);
+        if head.is_null() {
+            return 0;
+        }
+        let (mut last, mut n) = (head, 1);
+        while !(*word(last, 0)).is_null() {
+            last = *word(last, 0);
+            n += 1;
+        }
+        push_remote(c, head, last);
+        n
     }
 }
 
@@ -323,8 +416,8 @@ unsafe fn cache_flush(c: *const Cache, g: &mut Guard<'_>) {
 /// состояние на каждой операции; выход потока обслуживает [`ExitGuard`].
 struct Caches([Cell<*mut Cache>; CLASSES]);
 
-/// Выход потока: свободные узлы — в общий стек, остаток плиты — до `trim`,
-/// кэш — из реестра. Регистрируется при создании первого кэша потока.
+/// Выход потока: пачки чужих узлов — владельцам, кэши — в сироты.
+/// Регистрируется при создании первого кэша потока.
 struct ExitGuard;
 
 impl Drop for ExitGuard {
@@ -334,37 +427,18 @@ impl Drop for ExitGuard {
 }
 
 fn release_caches(caches: &Caches) {
-    {
-        for (class, slot) in caches.0.iter().enumerate() {
-            let cache = slot.replace(ptr::null_mut());
-            if cache.is_null() {
-                continue;
-            }
-            let mut g = POOLS[class].lock();
-            // SAFETY: кэш свой и живой; блокировка наша; узлы реестра — живые
-            // кэши, `next` меняется только под блокировкой.
-            unsafe {
-                cache_flush(cache, &mut g);
-                let uncarved = cache_uncarved(cache, class * 8);
-                let inner = g.inner();
-                inner.abandoned += uncarved;
-                let mut r: *const Cache = ptr::null();
-                let mut c = inner.registry;
-                while !ptr::eq(c, cache) {
-                    r = c;
-                    c = (*c).next.get();
-                }
-                if r.is_null() {
-                    inner.registry = (*cache).next.get();
-                } else {
-                    (*r).next.set((*cache).next.get());
-                }
-            }
-            drop(g);
-            // SAFETY: кэш из `Box::into_raw` в `register`, ссылок на него
-            // больше нет (из реестра снят).
-            drop(unsafe { Box::from_raw(cache) });
+    for (class, slot) in caches.0.iter().enumerate() {
+        let cache: *const Cache = slot.replace(ptr::null_mut());
+        if cache.is_null() {
+            continue;
         }
+        // SAFETY: кэш свой и живой.
+        unsafe { flush_out(cache) };
+        let mut g = POOLS[class].lock();
+        let inner = g.inner();
+        // SAFETY: `orphan` — под блокировкой.
+        unsafe { (*cache).orphan.set(inner.orphans) };
+        inner.orphans = cache;
     }
 }
 
@@ -375,26 +449,27 @@ thread_local! {
     static EXIT: ExitGuard = const { ExitGuard };
 }
 
-/// Создать кэш потока для класса и внести в реестр; null, если поток уже
-/// завершается (деструктор `EXIT` отработал или идёт — кэш не на кого было
-/// бы оставить): тогда узлы идут мимо кэша.
+/// Кэш потока для класса: сирота, если есть, иначе новый (в реестр); null,
+/// если поток уже завершается (деструктор `EXIT` отработал или идёт — кэш не
+/// на кого было бы оставить): тогда узлы идут мимо кэша.
 fn register(class: usize, slot: &Cell<*mut Cache>) -> *const Cache {
     if EXIT.try_with(|_| ()).is_err() {
         return ptr::null();
     }
-    let cache = Box::into_raw(Box::new(Cache {
-        free: AtomicPtr::new(ptr::null_mut()),
-        nfree: AtomicU32::new(0),
-        cur: AtomicPtr::new(ptr::null_mut()),
-        end: AtomicPtr::new(ptr::null_mut()),
-        next: Cell::new(ptr::null()),
-    }));
     let mut g = POOLS[class].lock();
     let inner = g.inner();
-    // SAFETY: кэш только что создан, `next` — под блокировкой.
-    unsafe { (*cache).next.set(inner.registry) };
-    inner.registry = cache;
-    slot.set(cache);
+    let mut cache = inner.orphans;
+    if cache.is_null() {
+        cache = Cache::new();
+        // SAFETY: кэш только что создан, `next` — под блокировкой.
+        unsafe { (*cache).next.set(inner.registry) };
+        inner.registry = cache;
+    } else {
+        // SAFETY: сирота — кэш пула, `orphan` — под блокировкой.
+        inner.orphans = unsafe { (*cache).orphan.get() };
+        inner.adoptions += 1;
+    }
+    slot.set(cache.cast_mut());
     cache
 }
 
@@ -426,39 +501,26 @@ fn alloc(class: usize) -> NonNull<u8> {
     unsafe { NonNull::new_unchecked(node) }
 }
 
-/// Список пуст (или кэша ещё нет): пачка из общего стека, затем плита
-/// потока, затем новая.
-#[inline(never)]
-fn alloc_slow(class: usize, slot: &Cell<*mut Cache>) -> *mut u8 {
-    let pool = &POOLS[class];
+/// Узел из кэша, у которого список пуст: стек освобождений, затем плита
+/// кэша, затем новая.
+///
+/// # Safety
+/// `c` — свой живой кэш (или общий под `shared_lock`).
+unsafe fn alloc_from(class: usize, c: *const Cache) -> *mut u8 {
     let size = class * 8;
-    let mut c: *const Cache = slot.get();
-    if c.is_null() {
-        c = register(class, slot);
-        if c.is_null() {
-            return alloc_uncached(class);
-        }
-    }
-    if !pool.batches.load(Relaxed).is_null() {
-        let mut g = pool.lock();
-        if let Some((head, n)) = g.pop_batch() {
-            g.inner().refills += 1;
-            drop(g);
-            // SAFETY: пачка теперь наша, слово 0 головы — остальные узлы; кэш
-            // свой и живой.
-            unsafe {
-                (*c).free.store(*word(head, 0), Relaxed);
-                (*c).nfree.store(n - 1, Relaxed);
-            }
-            return head;
-        }
-    }
-    // SAFETY: свой живой кэш; нарезка в пределах плиты: заголовок и
-    // `per_slab` узлов, `cur` < `end`.
+    // SAFETY: см. контракт; у усыновлённой сироты список может быть не пуст.
     unsafe {
+        let n = (*c).free.load(Relaxed);
+        if !n.is_null() || collect(c) {
+            let n = (*c).free.load(Relaxed);
+            (*c).free.store(*word(n, 0), Relaxed);
+            (*c).nfree.store((*c).nfree.load(Relaxed) - 1, Relaxed);
+            return n;
+        }
+        // Нарезка в пределах плиты: заголовок и `per_slab` узлов, `cur` < `end`.
         let mut cur = (*c).cur.load(Relaxed);
         if cur.is_null() || cur == (*c).end.load(Relaxed) {
-            let slab = pool.lock().new_slab();
+            let slab = POOLS[class].lock().new_slab(c);
             let per_slab = SLAB_BYTES / size - 1;
             cur = slab.add(size);
             (*c).end.store(cur.add(per_slab * size), Relaxed);
@@ -468,49 +530,52 @@ fn alloc_slow(class: usize, slot: &Cell<*mut Cache>) -> *mut u8 {
     }
 }
 
+/// Список пуст (или кэша ещё нет).
+#[inline(never)]
+fn alloc_slow(class: usize, slot: &Cell<*mut Cache>) -> *mut u8 {
+    let mut c: *const Cache = slot.get();
+    if c.is_null() {
+        c = register(class, slot);
+        if c.is_null() {
+            return alloc_uncached(class);
+        }
+    }
+    // SAFETY: свой живой кэш.
+    unsafe { alloc_from(class, c) }
+}
+
 /// Поток завершается (выделение из деструктора thread-local другого
-/// значения после `EXIT`): узел из пачки или из новой плиты целиком.
+/// значения после `EXIT`): узел из общего кэша класса под блокировкой.
 #[cold]
 fn alloc_uncached(class: usize) -> *mut u8 {
-    let size = class * 8;
-    let mut g = POOLS[class].lock();
-    if let Some((head, n)) = g.pop_batch() {
-        if n > 1 {
-            // SAFETY: остаток пачки — свободные узлы.
-            let rest = unsafe { *word(head, 0) };
-            g.push_batch(rest, n - 1);
+    let pool = &POOLS[class];
+    let c = {
+        let mut g = pool.lock();
+        let inner = g.inner();
+        if inner.shared.is_null() {
+            let c = Cache::new();
+            // SAFETY: кэш только что создан, `next` — под блокировкой.
+            unsafe { (*c).next.set(inner.registry) };
+            inner.registry = c;
+            inner.shared = c;
         }
-        return head;
-    }
-    let slab = g.new_slab();
-    let per_slab = SLAB_BYTES / size - 1;
-    // SAFETY: узлы 1..per_slab плиты связываются в список; первый — наш.
-    unsafe {
-        let first = slab.add(size);
-        for i in 1..per_slab {
-            let node = first.add(i * size);
-            *word(node, 0) = if i + 1 < per_slab {
-                node.add(size)
-            } else {
-                ptr::null_mut()
-            };
-        }
-        if per_slab > 1 {
-            // Узлов в плите не больше 4095.
-            #[allow(clippy::cast_possible_truncation)]
-            g.push_batch(first.add(size), (per_slab - 1) as u32);
-        }
-        first
-    }
+        inner.shared
+    };
+    // Блокировка пула отпущена: новую плиту `alloc_from` берёт под ней сам.
+    let _s = Spin::lock(&pool.shared_lock);
+    // SAFETY: общий кэш — только под `shared_lock`.
+    unsafe { alloc_from(class, c) }
 }
 
 #[inline]
 fn free(class: usize, node: NonNull<u8>) {
     let p = node.as_ptr();
+    // SAFETY: узел выдан пулом этого класса, его плита жива.
+    let owner = unsafe { owner(p) };
     CACHES.with(|cs| {
         let slot = &cs.0[class];
         let c = slot.get();
-        if !c.is_null() {
+        if ptr::eq(owner, c) {
             // SAFETY: свой живой кэш; узел больше не используется, слово 0
             // — под список.
             unsafe {
@@ -518,52 +583,44 @@ fn free(class: usize, node: NonNull<u8>) {
                 *word(p, 0) = (*c).free.load(Relaxed);
                 (*c).free.store(p, Relaxed);
                 (*c).nfree.store(k, Relaxed);
-                if k <= CACHE_MAX {
-                    return;
-                }
             }
+            return;
         }
-        free_slow(class, slot, p);
+        free_remote(class, slot, owner, p);
     });
 }
 
-/// Кэша нет — создать и положить узел; иначе список превысил `CACHE_MAX`
-/// (узел уже в нём) — `BATCH` узлов с вершины в общий стек.
+/// Узел чужой плиты: в пачку потока для его владельца (пачка другому
+/// владельцу уходит первой). Без кэша — владельцу сразу.
 #[inline(never)]
-fn free_slow(class: usize, slot: &Cell<*mut Cache>, p: *mut u8) {
-    let c: *const Cache = slot.get();
+fn free_remote(class: usize, slot: &Cell<*mut Cache>, owner: *const Cache, p: *mut u8) {
+    let mut c: *const Cache = slot.get();
     if c.is_null() {
-        let c = register(class, slot);
+        c = register(class, slot);
         if c.is_null() {
-            let mut g = POOLS[class].lock();
-            // SAFETY: узел свободен; пачка из одного узла.
-            unsafe { *word(p, 0) = ptr::null_mut() };
-            g.push_batch(p, 1);
+            // SAFETY: узел свободен и принадлежит плите `owner`.
+            unsafe { push_remote(owner, p, p) };
             return;
         }
-        // SAFETY: узел свободен; кэш только что создан, список пуст.
-        unsafe {
-            *word(p, 0) = ptr::null_mut();
-            (*c).free.store(p, Relaxed);
-            (*c).nfree.store(1, Relaxed);
-        }
-        return;
     }
-    // SAFETY: свой живой кэш; в списке больше `BATCH` узлов, связаны словом 0.
-    let head = unsafe {
-        let head = (*c).free.load(Relaxed);
-        let mut last = head;
-        for _ in 1..BATCH {
-            last = *word(last, 0);
+    // SAFETY: свой живой кэш; узел свободен, слово 0 — под пачку.
+    unsafe {
+        if !ptr::eq((*c).out_owner.get(), owner) {
+            flush_out(c);
+            (*c).out_owner.set(owner);
         }
-        (*c).free.store(*word(last, 0), Relaxed);
-        *word(last, 0) = ptr::null_mut();
-        (*c).nfree.store((*c).nfree.load(Relaxed) - BATCH, Relaxed);
-        head
-    };
-    let mut g = POOLS[class].lock();
-    g.push_batch(head, BATCH);
-    g.inner().spills += 1;
+        let head = (*c).out_head.get();
+        *word(p, 0) = head;
+        if head.is_null() {
+            (*c).out_tail.set(p);
+        }
+        (*c).out_head.set(p);
+        let k = (*c).nout.load(Relaxed) + 1;
+        (*c).nout.store(k, Relaxed);
+        if k == REMOTE_BATCH {
+            flush_out(c);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +635,7 @@ pub struct PoolStats {
     pub slab_bytes: usize,
     /// Узлов в них.
     pub capacity: usize,
-    /// Из них свободных: в кэшах потоков, ненарезанных, в общем стеке.
+    /// Из них свободных: в кэшах потоков и ненарезанных.
     pub free: usize,
     /// Из них живых: `capacity - free`.
     pub live: usize,
@@ -586,10 +643,10 @@ pub struct PoolStats {
     pub slab_allocs: u64,
     /// Плит возвращено ([`trim`]).
     pub slab_frees: u64,
-    /// Пачек отдано кэшами потоков в общий стек.
-    pub spills: u64,
-    /// Пачек взято из него.
-    pub refills: u64,
+    /// Сколько раз владельцы забрали узлы, освобождённые другими потоками.
+    pub collects: u64,
+    /// Кэшей завершившихся потоков, взятых новыми потоками.
+    pub adoptions: u64,
 }
 
 /// Статистика всех пулов.
@@ -609,8 +666,15 @@ pub fn stats() -> PoolStats {
         s.live += capacity - free;
         s.slab_allocs += inner.slab_allocs;
         s.slab_frees += inner.slab_frees;
-        s.spills += inner.spills;
-        s.refills += inner.refills;
+        s.adoptions += inner.adoptions;
+        let mut c = inner.registry;
+        while !c.is_null() {
+            // SAFETY: кэши не освобождаются; `next` — под блокировкой.
+            unsafe {
+                s.collects += (*c).collects.load(Relaxed);
+                c = (*c).next.get();
+            }
+        }
     }
     s
 }
@@ -643,21 +707,23 @@ pub fn trim() -> usize {
         }
         inner.slabs = ptr::null_mut();
         inner.nslabs = 0;
-        inner.global = 0;
-        inner.abandoned = 0;
         let mut c = inner.registry;
         while !c.is_null() {
-            // SAFETY: живой кэш реестра; его поток пулом сейчас не пользуется;
+            // SAFETY: кэш реестра; его поток пулом сейчас не пользуется;
             // ссылки — только на отдельные поля (см. `Cache`).
             unsafe {
                 (*c).free.store(ptr::null_mut(), Relaxed);
                 (*c).nfree.store(0, Relaxed);
                 (*c).cur.store(ptr::null_mut(), Relaxed);
                 (*c).end.store(ptr::null_mut(), Relaxed);
+                (*c).out_owner.set(ptr::null());
+                (*c).out_head.set(ptr::null_mut());
+                (*c).out_tail.set(ptr::null_mut());
+                (*c).nout.store(0, Relaxed);
+                (*c).remote.0.store(ptr::null_mut(), Relaxed);
                 c = (*c).next.get();
             }
         }
-        pool.batches.store(ptr::null_mut(), Relaxed);
     }
     bytes
 }

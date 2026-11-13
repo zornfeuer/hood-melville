@@ -51,18 +51,21 @@
 //
 // Implementation options (define before the FQUEUE_IMPLEMENTATION include):
 // FQUEUE_MALLOC and FQUEUE_FREE together replace malloc and free; they must
-// have the same signatures. FQUEUE_ATOMIC makes this instantiation thread-safe
-// (see Threads); it affects only the definitions, not the declarations.
+// have the same signatures. With them, a node pool also needs
+// FQUEUE_ALIGNED_MALLOC, which replaces aligned_alloc (its blocks are freed
+// by FQUEUE_FREE). FQUEUE_ATOMIC makes this instantiation thread-safe (see
+// Threads); it affects only the definitions, not the declarations.
 //
 // Node pool. With FQUEUE_NODE_POOL defined for both includes (it changes the
 // declarations too), nodes come from a pool of this instantiation instead of
-// one FQUEUE_MALLOC per node: slabs of 64 KiB from FQUEUE_MALLOC, a cache of
-// free nodes per thread (POSIX threads). The queue API and its guarantees are
-// the same; a pool slab that cannot be allocated is FQUEUE_NOMEM. Slabs are
-// not returned while a node is live — the pool keeps the peak of live nodes —
-// until NAME_pool_trim; it is the library's only global state. Specification
-// and trade-offs: docs/pool.md. fqueue.h provides fqueue_pooled and
-// fqueue_pooled_sync.
+// one FQUEUE_MALLOC per node: slabs of 16 KiB from FQUEUE_ALIGNED_MALLOC, a
+// cache of free nodes per thread (POSIX threads); a node freed by another
+// thread goes back to the thread that carved it. The queue API and its
+// guarantees are the same; a pool slab that cannot be allocated is
+// FQUEUE_NOMEM. Slabs are not returned while a node is live — the pool keeps
+// the peak of live nodes — until NAME_pool_trim; it is the library's only
+// global state. Specification and trade-offs: docs/pool.md. fqueue.h provides
+// fqueue_pooled and fqueue_pooled_sync.
 //
 // Threads. Without FQUEUE_ATOMIC, versions that share nodes must not be used
 // concurrently, even for reading: reference counts are not atomic. Versions
@@ -256,9 +259,16 @@ FQUEUE_API size_t FQUEUE_IMPL_N(pool_trim)(void);
 #ifdef FQUEUE_MALLOC
 void *FQUEUE_MALLOC(size_t size);
 void FQUEUE_FREE(void *ptr);
+#ifdef FQUEUE_ALIGNED_MALLOC
+void *FQUEUE_ALIGNED_MALLOC(size_t alignment, size_t size);
+#endif
 #else
-#define FQUEUE_MALLOC malloc
-#define FQUEUE_FREE   free
+#if defined(FQUEUE_ALIGNED_MALLOC)
+#error "FQUEUE_ALIGNED_MALLOC goes with FQUEUE_MALLOC and FQUEUE_FREE"
+#endif
+#define FQUEUE_MALLOC         malloc
+#define FQUEUE_FREE           free
+#define FQUEUE_ALIGNED_MALLOC aligned_alloc
 #endif
 
 // Limits; the tests lower them to reach them. A queue holds at most LEN_LIMIT
@@ -314,6 +324,9 @@ struct FQUEUE_IMPL_NODE {
 // Where nodes come from: FQUEUE_MALLOC/FQUEUE_FREE per node, or the pool of
 // this instantiation (fqueue_pool_impl.h, docs/pool.md).
 #ifdef FQUEUE_NODE_POOL
+#ifndef FQUEUE_ALIGNED_MALLOC
+#error "a node pool with FQUEUE_MALLOC needs FQUEUE_ALIGNED_MALLOC"
+#endif
 #include "fqueue_pool_impl.h"
 _Static_assert(sizeof(FQUEUE_IMPL_NODE) >= 2 * sizeof(void *),
                "a free pool node holds two pointers");
@@ -323,9 +336,15 @@ static _Thread_local fqueue_impl_npool_cache *FQUEUE_IMPL_P(node_pool_cache);
 #define FQUEUE_IMPL_NODE_NEW()                                                 \
   ((FQUEUE_IMPL_NODE *)fqueue_impl_npool_alloc(                                \
       &FQUEUE_IMPL_P(node_pool), &FQUEUE_IMPL_P(node_pool_cache)))
+#ifdef FQUEUE_ATOMIC
+#define FQUEUE_IMPL_NODE_DELETE(n)                                             \
+  fqueue_impl_npool_free_outlined(&FQUEUE_IMPL_P(node_pool),                   \
+                                  &FQUEUE_IMPL_P(node_pool_cache), (n))
+#else
 #define FQUEUE_IMPL_NODE_DELETE(n)                                             \
   fqueue_impl_npool_free(&FQUEUE_IMPL_P(node_pool),                            \
                          &FQUEUE_IMPL_P(node_pool_cache), (n))
+#endif
 
 void FQUEUE_IMPL_N(pool_stats)(fqueue_pool_stats *stats) {
   fqueue_impl_npool_stats(&FQUEUE_IMPL_P(node_pool), stats);

@@ -31,8 +31,9 @@ template <> struct Pool<fqueue_pooled_sync> {
   static size_t trim() { return fqueue_pooled_sync_pool_trim(); }
 };
 
-// Nodes per 64 KiB slab of 16-byte nodes: the first one is the header.
-static constexpr size_t PER_SLAB = 65536 / 16 - 1;
+// Slab size, and nodes per slab of 16-byte nodes: the first one is the header.
+static constexpr size_t SLAB = 16384;
+static constexpr size_t PER_SLAB = SLAB / 16 - 1;
 
 template <class Q> static Q filled(int n) {
   Q q;
@@ -65,7 +66,7 @@ TEMPLATE_TEST_CASE("the pool counts live nodes and trims when none is left",
   TestType q = filled<TestType>(20000);
   fqueue_pool_stats s = P::stats();
   REQUIRE(s.slabs > 0);
-  REQUIRE(s.slab_bytes == s.slabs * 65536);
+  REQUIRE(s.slab_bytes == s.slabs * SLAB);
   REQUIRE(s.capacity == s.slabs * PER_SLAB);
   REQUIRE(s.live + s.free == s.capacity);
   // A queue of n elements holds at least n nodes (more during a rotation).
@@ -112,31 +113,46 @@ TEMPLATE_TEST_CASE("memory is kept at the peak of live nodes until trim",
   for (int i = 0; i < 90000; ++i) REQUIRE(A::push_in_place(&q, i) == FQUEUE_OK);
   REQUIRE(P::stats().slabs == peak);
   A::destroy(&q);
-  REQUIRE(P::trim() == peak * 65536);
+  REQUIRE(P::trim() == peak * SLAB);
 }
 
-TEMPLATE_TEST_CASE("a long cache spills batches that other threads take",
+TEMPLATE_TEST_CASE("nodes freed by another thread return to their owner",
                    "[pool]", fqueue_pooled, fqueue_pooled_sync) {
   using A = Api<TestType>;
   using P = Pool<TestType>;
   P::trim();
   fqueue_pool_stats before = P::stats();
-  // Destroying a long queue frees far more than the cache holds.
   TestType q = filled<TestType>(10000);
-  A::destroy(&q);
+  size_t slabs = P::stats().slabs;
+  std::thread([&q] { Api<TestType>::destroy(&q); }).join();
   fqueue_pool_stats s = P::stats();
-  REQUIRE(s.spills > before.spills);
-  REQUIRE(s.live == 0);
-  size_t slabs = s.slabs;
-  // Another thread builds a queue from the spilled batches: no new slab.
-  bool ok = false;
-  std::thread([&ok] { ok = fill_and_destroy<TestType>(5000); }).join();
-  REQUIRE(ok);
+  REQUIRE(s.live == 0); // on this thread's remote stack
+  // This thread takes them back for a new queue: no new slab.
+  TestType r = filled<TestType>(10000);
   s = P::stats();
-  REQUIRE(s.refills > before.refills);
+  REQUIRE(s.collects > before.collects);
   REQUIRE(s.slabs == slabs);
-  REQUIRE(s.live == 0); // the exited thread's cache went back to the pool
-  REQUIRE(P::trim() == slabs * 65536);
+  A::destroy(&r);
+  REQUIRE(P::trim() == slabs * SLAB);
+}
+
+TEMPLATE_TEST_CASE("the cache of an exited thread is adopted", "[pool]",
+                   fqueue_pooled, fqueue_pooled_sync) {
+  using P = Pool<TestType>;
+  P::trim();
+  fqueue_pool_stats before = P::stats();
+  bool ok1 = false, ok2 = false;
+  std::thread([&ok1] { ok1 = fill_and_destroy<TestType>(10000); }).join();
+  size_t slabs = P::stats().slabs;
+  // The next thread adopts the first one's cache with its free nodes.
+  std::thread([&ok2] { ok2 = fill_and_destroy<TestType>(10000); }).join();
+  REQUIRE(ok1);
+  REQUIRE(ok2);
+  fqueue_pool_stats s = P::stats();
+  REQUIRE(s.adoptions > before.adoptions);
+  REQUIRE(s.slabs == slabs);
+  REQUIRE(s.live == 0);
+  REQUIRE(P::trim() == slabs * SLAB);
 }
 
 TEMPLATE_TEST_CASE("an exiting thread returns its cache and its slab", "[pool]",
@@ -168,16 +184,15 @@ TEMPLATE_TEST_CASE("an exiting thread returns its cache and its slab", "[pool]",
   fqueue_pool_stats s = P::stats();
   REQUIRE(s.slabs >= 4); // a slab per thread
   REQUIRE(s.live == 0);
-  REQUIRE(P::trim() == s.slabs * 65536);
+  REQUIRE(P::trim() == s.slabs * SLAB);
 }
 
-TEST_CASE("nodes freed by another thread stay in that thread's cache",
-          "[pool]") {
+TEST_CASE("readers dropping the last references return the nodes", "[pool]") {
   using A = Api<fqueue_pooled_sync>;
   using P = Pool<fqueue_pooled_sync>;
   P::trim();
-  // Writer allocates, readers drop the last references: the nodes go to the
-  // readers' caches and, over the limit, to the global stack.
+  // Writer allocates, readers drop the last references: the nodes go back to
+  // the writer's cache in batches (the readers exit, pushing what is left).
   enum { N = 30000, READERS = 4 };
   fqueue_pooled_sync base = filled<fqueue_pooled_sync>(N);
   std::vector<fqueue_pooled_sync> clones(READERS);
@@ -190,5 +205,5 @@ TEST_CASE("nodes freed by another thread stay in that thread's cache",
   for (std::thread &th : threads) th.join();
   fqueue_pool_stats s = P::stats();
   REQUIRE(s.live == 0);
-  REQUIRE(P::trim() == s.slabs * 65536);
+  REQUIRE(P::trim() == s.slabs * SLAB);
 }

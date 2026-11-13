@@ -98,6 +98,7 @@ if(HOOD_MELVILLE_BUILD_TESTS)
     target_include_directories(fqueue_limits PUBLIC include)
     target_compile_definitions(fqueue_limits PRIVATE
         FQUEUE_MALLOC=fqueue_test_malloc FQUEUE_FREE=fqueue_test_free
+        FQUEUE_ALIGNED_MALLOC=fqueue_test_aligned_malloc
         FQUEUE_IMPL_LEN_LIMIT=${FQUEUE_TEST_LEN_LIMIT}
         FQUEUE_IMPL_REFS_LIMIT=${FQUEUE_TEST_REFS_LIMIT}
         FQUEUE_IMPL_ATOMIC_REFS_LIMIT=${FQUEUE_TEST_REFS_LIMIT})

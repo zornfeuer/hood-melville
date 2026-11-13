@@ -23,8 +23,9 @@ fn serial() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Узлов в плите 65 536 байт из 16-байтовых узлов: первый — заголовок.
-const PER_SLAB: usize = 65536 / 16 - 1;
+/// Размер плиты и узлов в ней из 16-байтовых узлов: первый — заголовок.
+const SLAB: usize = 16384;
+const PER_SLAB: usize = SLAB / 16 - 1;
 
 fn xorshift(x: &mut u64) -> u64 {
     *x ^= *x << 13;
@@ -131,7 +132,7 @@ fn stats_count_live_nodes_and_trim_returns_slabs() {
     let q: PooledQueue<u32> = (0..n).collect();
     let s = pool::stats();
     assert!(s.slabs > 0);
-    assert_eq!(s.slab_bytes, s.slabs * 65536);
+    assert_eq!(s.slab_bytes, s.slabs * SLAB);
     assert_eq!(s.capacity, s.slabs * PER_SLAB);
     assert_eq!(s.live + s.free, s.capacity);
     assert!(s.live >= n as usize && s.live <= 3 * n as usize);
@@ -170,32 +171,45 @@ fn memory_is_kept_at_the_peak_until_trim() {
     }
     assert_eq!(pool::stats().slabs, peak, "рост снова — из свободных узлов");
     drop(q);
-    assert_eq!(pool::trim(), peak * 65536);
+    assert_eq!(pool::trim(), peak * SLAB);
 }
 
 #[test]
-fn long_cache_spills_batches_other_threads_take() {
+fn nodes_freed_by_another_thread_return_to_their_owner() {
     let _g = serial();
     pool::trim();
     let before = pool::stats();
-    // Больше предела кэша потока (4096), чтобы освобождение переливалось.
-    let n = if cfg!(miri) { 6_000 } else { 10_000 };
-    drop((0..n).collect::<PooledQueue<u32>>());
+    let n = if cfg!(miri) { 2_000 } else { 10_000 };
+    let q: SyncPooledQueue<u32> = (0..n).collect();
+    let slabs = pool::stats().slabs;
+    thread::spawn(move || drop(q)).join().unwrap();
+    assert_eq!(pool::stats().live, 0, "в стеке освобождений этого потока");
+    let r: SyncPooledQueue<u32> = (0..n).collect();
     let s = pool::stats();
-    assert!(s.spills > before.spills);
+    assert!(s.collects > before.collects);
+    assert_eq!(s.slabs, slabs, "узлы вернулись владельцу, новых плит нет");
+    drop(r);
+    assert_eq!(pool::trim(), slabs * SLAB);
+}
+
+#[test]
+fn the_cache_of_an_exited_thread_is_adopted() {
+    let _g = serial();
+    pool::trim();
+    let before = pool::stats();
+    let n = if cfg!(miri) { 2_000 } else { 10_000 };
+    let fill = move || {
+        let q: PooledQueue<u32> = (0..n).collect();
+        assert_eq!(q.len(), n as usize);
+    };
+    // Число плит не проверяется: потоки других тестов, завершаясь, тоже
+    // оставляют сирот, и второй поток может взять не кэш первого.
+    thread::spawn(fill).join().unwrap();
+    thread::spawn(fill).join().unwrap();
+    let s = pool::stats();
+    assert!(s.adoptions > before.adoptions);
     assert_eq!(s.live, 0);
-    let slabs = s.slabs;
-    thread::spawn(move || {
-        let r: PooledQueue<u32> = (0..n / 2).collect();
-        assert_eq!(r.len(), (n / 2) as usize);
-    })
-    .join()
-    .unwrap();
-    let s = pool::stats();
-    assert!(s.refills > before.refills);
-    assert_eq!(s.slabs, slabs, "другой поток взял пачки, а не плиту");
-    assert_eq!(s.live, 0, "кэш завершившегося потока вернулся в пул");
-    assert_eq!(pool::trim(), slabs * 65536);
+    assert_eq!(pool::trim(), s.slabs * SLAB);
 }
 
 #[test]
@@ -227,7 +241,7 @@ fn exiting_threads_return_caches() {
     let s: PoolStats = pool::stats();
     assert!(s.slabs >= 4, "плита на поток");
     assert_eq!(s.live, 0);
-    assert_eq!(pool::trim(), s.slabs * 65536);
+    assert_eq!(pool::trim(), s.slabs * SLAB);
 }
 
 #[test]

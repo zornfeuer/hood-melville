@@ -289,7 +289,7 @@ test "пул узлов: те же истории, что у очередей б
 test "пул узлов: статистика, удержание пика и trim" {
     const Q = root.PooledQueue(i32);
     const a = std.testing.allocator;
-    const per_slab = 65536 / 16 - 1;
+    const per_slab = 16384 / 16 - 1;
     var q = Q.init();
     for (0..20000) |i| try q.pushInPlace(a, @intCast(i));
     var s = Q.node_pool.stats();
@@ -311,7 +311,6 @@ test "пул узлов: статистика, удержание пика и tr
     q.deinit(a);
     s = Q.node_pool.stats();
     try std.testing.expectEqual(@as(usize, 0), s.live);
-    try std.testing.expect(s.spills > 0); // длинные освобождения переливались
     try expectPoolEmptied(Q, a);
 }
 
@@ -364,7 +363,57 @@ test "пул узлов: потоки разбирают общие версии
         if (worker.failure) |err| return err;
         try std.testing.expectEqual(@as(i64, n * (n - 1) / 2), worker.sum);
     }
-    try std.testing.expect(PoolSync.node_pool.stats().refills > 0 or PoolSync.node_pool.stats().spills > 0);
+    try expectPoolEmptied(PoolSync, allocator);
+}
+
+const PoolDropper = struct {
+    fn run(q: *PoolSync, allocator: std.mem.Allocator) void {
+        defer PoolSync.node_pool.flushThreadCache();
+        q.deinit(allocator);
+    }
+};
+
+test "пул узлов: узлы, освобождённые другим потоком, возвращаются владельцу" {
+    var safe: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
+    defer std.testing.expect(safe.deinit() == .ok) catch @panic("queue leaked");
+    const allocator = safe.allocator();
+    const before = PoolSync.node_pool.stats();
+    var q = PoolSync.init();
+    for (0..10000) |i| try q.pushInPlace(allocator, @intCast(i));
+    const slabs = PoolSync.node_pool.stats().slabs;
+    const thread = try std.Thread.spawn(.{}, PoolDropper.run, .{ &q, allocator });
+    thread.join();
+    try std.testing.expectEqual(@as(usize, 0), PoolSync.node_pool.stats().live);
+    // Этот поток забирает их обратно под новую очередь: новых плит нет.
+    var r = PoolSync.init();
+    for (0..10000) |i| try r.pushInPlace(allocator, @intCast(i));
+    const s = PoolSync.node_pool.stats();
+    try std.testing.expect(s.collects > before.collects);
+    try std.testing.expectEqual(slabs, s.slabs);
+    r.deinit(allocator);
+    try expectPoolEmptied(PoolSync, allocator);
+}
+
+test "пул узлов: кэш потока после flushThreadCache берёт следующий поток" {
+    var safe: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
+    defer std.testing.expect(safe.deinit() == .ok) catch @panic("queue leaked");
+    const allocator = safe.allocator();
+    const before = PoolSync.node_pool.stats();
+    const Filler = struct {
+        fn run(a: std.mem.Allocator) void {
+            defer PoolSync.node_pool.flushThreadCache();
+            var q = PoolSync.init();
+            defer q.deinit(a);
+            for (0..10000) |i| q.pushInPlace(a, @intCast(i)) catch return;
+        }
+    };
+    (try std.Thread.spawn(.{}, Filler.run, .{allocator})).join();
+    const slabs = PoolSync.node_pool.stats().slabs;
+    (try std.Thread.spawn(.{}, Filler.run, .{allocator})).join();
+    const s = PoolSync.node_pool.stats();
+    try std.testing.expect(s.adoptions > before.adoptions);
+    try std.testing.expectEqual(slabs, s.slabs);
+    try std.testing.expectEqual(@as(usize, 0), s.live);
     try expectPoolEmptied(PoolSync, allocator);
 }
 

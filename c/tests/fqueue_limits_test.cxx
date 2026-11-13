@@ -28,17 +28,26 @@ static bool injected = false;
 // counts leak, freed by the test that made them (free_tracked).
 static std::set<void *> *tracked = nullptr;
 
-extern "C" void *fqueue_test_malloc(size_t size) {
+// The block from `get` (nullptr if the armed allocation fails), counted.
+template <class Get> static void *test_alloc(Get get) {
   if (fail_in == 0) {
     fail_in = -1;
     injected = true;
     return nullptr;
   }
   if (fail_in > 0) --fail_in;
-  void *p = std::malloc(size);
+  void *p = get();
   if (p) ++live, ++allocs;
   if (p && tracked) tracked->insert(p);
   return p;
+}
+
+extern "C" void *fqueue_test_malloc(size_t size) {
+  return test_alloc([size] { return std::malloc(size); });
+}
+
+extern "C" void *fqueue_test_aligned_malloc(size_t alignment, size_t size) {
+  return test_alloc([=] { return std::aligned_alloc(alignment, size); });
 }
 
 extern "C" void fqueue_test_free(void *ptr) {

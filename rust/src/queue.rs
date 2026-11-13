@@ -102,7 +102,7 @@ pub struct Queue<T, R: RefCount = Local, A: Allocator = Global> {
 pub type SyncQueue<T, A = Global> = Queue<T, Atomic, A>;
 
 /// [`Queue`] с узлами из пула ([`NodePool`], `docs/pool.md`): тот же API и
-/// семантика, узлы берутся из пула (плиты по 65 536 байт, кэш у каждого
+/// семантика, узлы берутся из пула (плиты по 16 384 байта, кэш у каждого
 /// потока) и возвращаются туда при обнулении счётчика. Пул держит память на
 /// пике живого множества до [`pool::trim`](crate::pool::trim).
 pub type PooledQueue<T> = Queue<T, Local, NodePool>;
